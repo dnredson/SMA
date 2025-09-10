@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "last_updated": "1970-01-01T00:00:00Z",
+  "clients": [
+    {
+      "device_raw_topic": "WXT520_WS_LANAPRE",
+      "external_id": "WXT520_WS_LANAPRE",
+      "client_id": "4e76c94d-fa39-46ee-b6f1-91764d1cf925",
+      "client_secret": {
+        "v": 1,
+        "alg": "aes-256-gcm",
+        "nonce": "",
+        "ct": "9daedb76-40ca-41c3-ab25-13b45e70ec6c"
+      },
+      "domain_id": "20d30d3a-eb51-4a43-a23c-c2a7feab2fdb",
+      "channel_ids": [
+        "3e4605ef-a87f-4b9b-ac10-0a977b46442a"
+      ],
+      "active": true,
+      "created_at": "2025-09-09T17:32:34Z",
+      "updated_at": "2025-09-09T17:32:34Z",
+      "last_seen": "2025-09-10T18:36:48Z"
+    },
+    {
+      "device_raw_topic": "ATMOS41_WS_NSAAB",
+      "external_id": "ATMOS41_WS_NSAAB",
+      "client_id": "ec5b4655-9dfb-46b7-ac73-ec8d251da68d",
+      "client_secret": {
+        "v": 1,
+        "alg": "aes-256-gcm",
+        "nonce": "",
+        "ct": "0dbaf326-eea9-40ca-b0e5-f97a51c4252a"
+      },
+      "domain_id": "20d30d3a-eb51-4a43-a23c-c2a7feab2fdb",
+      "channel_ids": [
+        "3e4605ef-a87f-4b9b-ac10-0a977b46442a"
+      ],
+      "active": true,
+      "created_at": "2025-09-10T11:10:46Z",
+      "updated_at": "2025-09-10T11:10:46Z",
+      "last_seen": "2025-09-10T14:11:11Z"
+    },
+    {
+      "device_raw_topic": "GREENSTICK_8_NSAAB",
+      "external_id": "GREENSTICK_8_NSAAB",
+      "client_id": "7b5042b6-ac5c-4ae0-a696-bbf0bb724025",
+      "client_secret": {
+        "v": 1,
+        "alg": "aes-256-gcm",
+        "nonce": "",
+        "ct": "8b6b7770-f494-4d94-8f72-2aedaca55a2a"
+      },
+      "domain_id": "20d30d3a-eb51-4a43-a23c-c2a7feab2fdb",
+      "channel_ids": [
+        "3e4605ef-a87f-4b9b-ac10-0a977b46442a"
+      ],
+      "active": true,
+      "created_at": "2025-09-10T14:12:35Z",
+      "updated_at": "2025-09-10T14:12:35Z",
+      "last_seen": "2025-09-10T14:13:24Z"
+    },
+    {
+      "device_raw_topic": "GREENSTICK_WS_NSAAB",
+      "external_id": "GREENSTICK_WS_NSAAB",
+      "client_id": "dc8435b2-c027-45ee-bd2c-790949535b28",
+      "client_secret": {
+        "v": 1,
+        "alg": "aes-256-gcm",
+        "nonce": "",
+        "ct": "c0c1fbe0-d5d9-460f-b953-617fdd40ec74"
+      },
+      "domain_id": "20d30d3a-eb51-4a43-a23c-c2a7feab2fdb",
+      "channel_ids": [
+        "3e4605ef-a87f-4b9b-ac10-0a977b46442a"
+      ],
+      "active": true,
+      "created_at": "2025-09-10T14:21:44Z",
+      "updated_at": "2025-09-10T14:21:44Z",
+      "last_seen": "2025-09-10T18:47:56Z"
+    },
+    {
+      "device_raw_topic": "GREENSTICK-8-NSAAB",
+      "external_id": "GREENSTICK-8-NSAAB",
+      "client_id": "e6652230-08da-43d8-94dc-747b75655980",
+      "client_secret": {
+        "v": 1,
+        "alg": "aes-256-gcm",
+        "nonce": "",
+        "ct": "f1ebf2b4-2292-4714-9422-74b2799a32a9"
+      },
+      "domain_id": "20d30d3a-eb51-4a43-a23c-c2a7feab2fdb",
+      "channel_ids": [
+        "3e4605ef-a87f-4b9b-ac10-0a977b46442a"
+      ],
+      "active": true,
+      "created_at": "2025-09-10T14:23:05Z",
+      "updated_at": "2025-09-10T14:23:05Z",
+      "last_seen": "2025-09-10T17:46:05Z"
+    },
+    {
+      "device_raw_topic": "GREENSTICK-9-NSAAB",
+      "external_id": "GREENSTICK-9-NSAAB",
+      "client_id": "76d641a2-6646-4841-98fe-deba7fc2b7cd",
+      "client_secret": {
+        "v": 1,
+        "alg": "aes-256-gcm",
+        "nonce": "",
+        "ct": "12112650-2124-499e-99cf-24ab638751c0"
+      },
+      "domain_id": "20d30d3a-eb51-4a43-a23c-c2a7feab2fdb",
+      "channel_ids": [
+        "3e4605ef-a87f-4b9b-ac10-0a977b46442a"
+      ],
+      "active": true,
+      "created_at": "2025-09-10T17:46:25Z",
+      "updated_at": "2025-09-10T17:46:25Z",
+      "last_seen": "2025-09-10T17:46:25Z"
+    }
+  ]
+}

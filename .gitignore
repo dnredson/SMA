@@ -1,0 +1,15 @@
+.env
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node/Build (se houver)
+node_modules/
+dist/
+build/
