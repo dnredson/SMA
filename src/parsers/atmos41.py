@@ -13,12 +13,6 @@ def _extract_numbers(after_first_plus: str) -> List[float]:
     return nums
 
 
-# Ordem (aR0 contínuo):
-# 0 solar(W/m2), 1 precip(mm), 2 strikes, 3 strikeDist(km), 4 wind(m/s), 5 dir(deg),
-# 6 gust(m/s), 7 Tair(C), 8 vaporPress(kPa), 9 pressure(kPa), 10 RH(fração 0-1),
-# 11 T_hum(C), 12 xOri(deg), 13 yOri(deg), 14 null, 15 windNorth(m/s), 16 windEast(m/s)
-
-
 def parse(payload: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     s = payload.strip()
     if "+" not in s:

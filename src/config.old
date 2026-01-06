@@ -32,3 +32,14 @@ retry_backoff_ms = 200
 rotate_on_boot = false
 senml_max_batch = 100
 users_url = "http://localhost:9002"
+quality_alerts_enable = true
+quality_enable = true
+quality_thresholds_json = '''
+{
+  "rel.humidity":        {"min": 0.0,  "max": 1.0},
+  "battery.level":       {"min": 0.0,  "max": 100.0},
+  "soil.raw.moisture_*": {"min": 0.0,  "max": 2500.0},
+  "soil.raw.ec_*":       {"min": 0.0,  "max": 2500.0},
+  "soil.raw.temp_*":     {"min": -25.0, "max": 100.0}
+}
+

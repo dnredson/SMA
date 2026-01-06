@@ -3,7 +3,7 @@ import re, json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import wxt520_csv, wxt520_sdi, atmos41, teros12, greenstick_ul
+from . import wxt520_csv, wxt520_sdi, atmos41, teros12, greenstick_ul, greenstick_common
 
 
 @dataclass
@@ -24,30 +24,53 @@ def _normalize_topic(raw: str) -> str:
 
 
 def _route_by_topic(topic: str) -> Optional[str]:
-    if topic.startswith("WXT520_"):
+    t = topic.upper()
+    if t.startswith("WXT520_"):
         return "wxt520"
-    if topic.startswith("ATMOS41_"):
+    if t.startswith("ATMOS41_"):
         return "atmos41"
-    if topic.startswith("TEROS12_"):
+    if t.startswith("TEROS12_"):
         return "teros12"
-    if topic.startswith("GREENSTICK_"):
+
+    # aceita variações de tipagem e com/sem sufixo
+    if (
+        t.startswith("GREENSTICK")
+        or t.startswith("GEENSTICK")
+        or t.startswith("GREENSTICKS")
+        or t.startswith("GEENSTICKS")
+    ):
         return "greenstick"
-    if topic.startswith("TTN_"):
+
+    if t.startswith("TTN_"):
         return "ttn"
     return None
 
 
 def detect_and_parse(topic: str, payload: bytes) -> NormalizeResult:
-    if not TOPIC_RE.match(topic):
-        return NormalizeResult(accept=False)
-
-    fam = _route_by_topic(topic)
-    if fam is None:
-        return NormalizeResult(accept=False)
-
-    external_id = _normalize_topic(topic)
+    norm = _normalize_topic(topic)  # NORMALIZA PRIMEIRO
+    external_id = norm  # já está normalizado
     s = payload.decode("utf-8", errors="ignore").strip()
 
+    # if not TOPIC_RE.match(norm):
+    #    return NormalizeResult(accept=False)
+
+    fam = _route_by_topic(norm)  # ROTEIA NO TOPIC NORMALIZADO
+    if fam is None:
+        if s.startswith("{"):
+            try:
+                js = json.loads(s)
+                if (
+                    isinstance(js, dict)
+                    and "end_device_ids" in js
+                    and "uplink_message" in js
+                ):
+                    ext2, entries, meta = greenstick_common.parse_chirpstack_json(js)
+                    return NormalizeResult(True, ext2, entries, meta)
+            except Exception:
+                pass
+        return NormalizeResult(accept=False)
+
+    external_id = norm
     # --- WXT520 CSV & SDI-12 ---
     if fam == "wxt520":
         if s.startswith("0R0,") or s.startswith("0R3,"):
@@ -69,20 +92,33 @@ def detect_and_parse(topic: str, payload: bytes) -> NormalizeResult:
         return NormalizeResult(True, external_id, entries, meta)
 
     # --- GREENSTICK UL (direto) ---
+    # --- GREENSTICK UL/JSON ---
+    # --- GREENSTICK (UL ou JSON do ChirpStack/TTN) ---
     if fam == "greenstick":
-        if s.startswith("{"):  # pode ser JSON (ex.: debug manual), tenta TTN json
+        if s.startswith("{"):
             try:
                 js = json.loads(s)
-                ext2, entries, meta = greenstick_ul.parse_ttn_json(js)
+                ext2, entries, meta = greenstick_common.parse_chirpstack_json(js)
                 return NormalizeResult(True, ext2, entries, meta)
             except Exception:
                 return NormalizeResult(False)
-        # ultralight: começa com 'S|' ou '|' (linhas subsequentes)
         if s.startswith("S|") or s.startswith("|"):
-            entries, meta = greenstick_ul.parse(s)
+            entries, meta = greenstick_common.parse_ultralight_line(s)
             return NormalizeResult(True, external_id, entries, meta)
         return NormalizeResult(False)
 
+    if fam == "geensticks":
+        if s.startswith("{"):
+            try:
+                js = json.loads(s)
+                ext2, entries, meta = greenstick_common.parse_chirpstack_json(js)
+                return NormalizeResult(True, ext2, entries, meta)
+            except Exception:
+                return NormalizeResult(False)
+        if s.startswith("S|") or s.startswith("|"):
+            entries, meta = greenstick_common.parse_ultralight_line(s)
+            return NormalizeResult(True, external_id, entries, meta)
+        return NormalizeResult(False)
     # --- TTN JSON envelope (ultralight dentro) ---
     if fam == "ttn" and s.startswith("{"):
         try:

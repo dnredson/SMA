@@ -1,5 +1,4 @@
-alerts_mqtt_address = "tcp://177.104.61.31:1883"
-alerts_mqtt_topic = "adapter/alerts"
+alerts_mqtt_address = "tcp://34.151.218.22:1883"
 batch_flush_ms = 200
 channels_url = "http://localhost:9007"
 clients_url = "http://localhost:9006"
@@ -11,7 +10,10 @@ http_bt_mode = "s"
 http_ingest_style = "dash"
 http_log_body = true
 http_log_body_max_bytes = -1
+log_backup_count = 5
+log_file = "/var/log/adapter/adapter.log"
 log_level = "debug"
+log_max_bytes = 10485760
 magistrala_address = "http://localhost"
 magistrala_cli_cwd = "/home/dener/magistrala/build"
 magistrala_cli_path = "/home/dener/magistrala/build/cli"
@@ -19,12 +21,12 @@ magistrala_default_channel = "3e4605ef-a87f-4b9b-ac10-0a977b46442a"
 magistrala_default_domain = "20d30d3a-eb51-4a43-a23c-c2a7feab2fdb"
 magistrala_user = "dnredson@gmail.com"
 magistrala_user_password_enc_json = "{\"v\":\"1\",\"alg\":\"aes-256-gcm\",\"nonce\":\"nrnEpiPBWU8fwonc\",\"ct\":\"UzNuaEAxMjM=\"}"
-magistrala_user_tokens_json = "{\"access_token\":\"eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NTc1MzM1NDgsImlhdCI6MTc1NzUyOTk0OCwiaXNzIjoic3VwZXJtcS5hdXRoIiwicm9sZSI6MSwic3ViIjoiZTkxNTQ5MGItZDdiZC00Y2FlLTg1NDgtYzI3Y2M3ZGZhZWJlIiwidHlwZSI6MH0.KvFSKQIMw5zsGxtOdWdHO8ra2nUylrSWK2dKODMbpHY6rdG2rLCQH2dj90LIov_gs2P3MFrUurE_PCO061b-jQ\",\"refresh_token\":\"eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NTc2MTYzNDgsImlhdCI6MTc1NzUyOTk0OCwiaXNzIjoic3VwZXJtcS5hdXRoIiwicm9sZSI6MSwic3ViIjoiZTkxNTQ5MGItZDdiZC00Y2FlLTg1NDgtYzI3Y2M3ZGZhZWJlIiwidHlwZSI6MX0.Yu_s06eu5zOJ7U2HVjjuFr-61Dybfnrd7ITWFSMEoEiWsL75KsSl6DXl0xEVbc_irvq4eXS0SqFbPyVjuFR31g\",\"expires_at\":1757533548}"
+magistrala_user_tokens_json = "{\"access_token\":\"eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjAxMTAwNzAsImlhdCI6MTc2MDEwNjQ3MCwiaXNzIjoic3VwZXJtcS5hdXRoIiwicm9sZSI6MSwic3ViIjoiZTkxNTQ5MGItZDdiZC00Y2FlLTg1NDgtYzI3Y2M3ZGZhZWJlIiwidHlwZSI6MH0.HSDxuTKUooMl6dWRarpfaHrhWdGWWQ3rJviBK5RPorWMV36BqH1cYMA9kzeXQ6kNUCmO0UYk7oqcpQSBfQzDgA\",\"refresh_token\":\"eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjAxOTI4NzAsImlhdCI6MTc2MDEwNjQ3MCwiaXNzIjoic3VwZXJtcS5hdXRoIiwicm9sZSI6MSwic3ViIjoiZTkxNTQ5MGItZDdiZC00Y2FlLTg1NDgtYzI3Y2M3ZGZhZWJlIiwidHlwZSI6MX0.E2szSzTpRPvT-ICHzvbAVbMB6gEZW7NV_sOLvdlo45AWL2cr7uPa_7VSBIEPRk49-cbnT36qVISV9I59a5ZxuA\",\"expires_at\":1760110070}"
 master_key_file = "./adapter.key"
 max_retries = 3
-mqtt_address = "tcp://177.104.61.31:1883"
+mqtt_address = "tcp://34.151.218.22:1883"
 mqtt_alert_qos = 0
-mqtt_alert_topic_base = "ALERTS"
+mqtt_alert_topic_base = "adapter/alerts"
 mqtt_topics = ["#"]
 publish_timeout_ms = 5000
 publisher_bn_append_colon = true
@@ -32,18 +34,46 @@ publisher_log_full_body = true
 publisher_log_full_secret = false
 quality_alerts_enable = true
 quality_enable = true
-quality_thresholds_json = "{
-  \"rel.humidity\": {\"min\": 0.0, \"max\": 1.0},
-  \"battery.level\": {\"min\": 0.0, \"max\": 100.0},
-  \"soil.raw.moisture_*\": {\"min\": 0.0, \"max\": 2500.0},
-  \"soil.raw.ec_*\": {\"min\": 0.0, \"max\": 2500.0},
-  \"soil.raw.temp_*\": {\"min\": -25.0, \"max\": 100.0}
+quality_thresholds_json = '''
+{
+  "rel.humidity":        {"min": 0.0,  "max": 1.0},
+  "battery.level":       {"min": 0.0,  "max": 100.0},
+  "soil.raw.moisture_*": {"min": 0.0,  "max": 2500.0},
+  "soil.raw.ec_*":       {"min": 0.0,  "max": 2500.0},
+  "soil.raw.temp_*":     {"min": -25.0, "max": 100.0}
 }
-"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+'''
 raw_password = ""
 reload_debounce_ms = 3000
 retry_backoff_ms = 200
 rotate_on_boot = false
 senml_max_batch = 100
-thresholds = [{ name = "soil.raw.moisture_*", min = 0, max = 2500 }, { name = "battery.level", min = 0, max = 100 }, { name = "battery.voltage", min = 3.0, max = 4.5 }]
 users_url = "http://localhost:9002"

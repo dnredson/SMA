@@ -1,5 +1,7 @@
 # src/core/config.py
 from __future__ import annotations
+import json
+import os
 from pathlib import Path
 from typing import Dict, Any
 
@@ -40,11 +42,38 @@ def _toml_format_value(v: Any) -> str:
 
 
 def write_config_atomic(path: Path, data: Dict[str, Any]) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    # grava chaves em ordem estável
+    """
+    Serializa o dicionário de configuração em TOML simples,
+    preservando strings multilinha com aspas triplas LITERAIS (''').
+    """
+
+    def _quote_str(s: str) -> str:
+        # Multilinha → usa literal string ''' ... '''
+        if ("\n" in s) or ("\r" in s):
+            return "'''\n" + s + "\n'''"
+        # Uma linha → escapa para string básica
+        esc = s.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{esc}"'
+
     lines = []
     for k in sorted(data.keys()):
         v = data[k]
-        lines.append(f"{k} = {_toml_format_value(v)}\n")
+        if isinstance(v, str):
+            lines.append(f"{k} = {_quote_str(v)}\n")
+        elif isinstance(v, bool):
+            lines.append(f"{k} = {str(v).lower()}\n")
+        elif isinstance(v, (int, float)):
+            lines.append(f"{k} = {v}\n")
+        elif isinstance(v, list):
+            # listas como JSON inline
+            lines.append(f"{k} = {json.dumps(v, ensure_ascii=False)}\n")
+        elif isinstance(v, dict):
+            # dicts como JSON inline
+            lines.append(f"{k} = {json.dumps(v, ensure_ascii=False)}\n")
+        else:
+            # fallback: string
+            lines.append(f"{k} = {_quote_str(str(v))}\n")
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text("".join(lines), encoding="utf-8")
-    tmp.replace(path)
+    os.replace(tmp, path)

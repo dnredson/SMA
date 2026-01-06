@@ -26,13 +26,60 @@ def setup_logging(level: str) -> None:
     )
 
 
+def setup_logging_from_cfg(cfg: Dict[str, Any]) -> None:
+    import logging
+    from logging.handlers import RotatingFileHandler
+    from pathlib import Path
+
+    level_name = str(cfg.get("log_level", "info")).upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    log_file = cfg.get("log_file")
+    max_bytes = int(cfg.get("log_max_bytes", 0))  # 0 = sem rotação por tamanho
+    backup_count = int(cfg.get("log_backup_count", 3))
+    rotate_on_boot = bool(cfg.get("rotate_on_boot", False))
+
+    # Limpa handlers existentes
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    handlers = []
+
+    if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        if max_bytes > 0:
+            fh = RotatingFileHandler(
+                log_file, maxBytes=max_bytes, backupCount=backup_count
+            )
+        else:
+            fh = logging.FileHandler(log_file)
+        handlers.append(fh)
+    else:
+        # fallback para console (stdout/stderr)
+        handlers.append(logging.StreamHandler())
+
+    logging.basicConfig(level=level, format=fmt, handlers=handlers)
+
+    # Se pediu rotação no boot e o handler suporta, faz o rollover agora
+    if log_file and rotate_on_boot:
+        for h in handlers:
+            if isinstance(h, RotatingFileHandler):
+                try:
+                    h.doRollover()
+                except Exception:
+                    pass
+                break
+
+
 def bootstrap_password(cfg_path: Path) -> None:
     """1ª execução: lê raw_password, cifra e limpa o plaintext no TOML."""
     cfg = load_config(cfg_path)
     if cfg.get("raw_password"):
         km = KeyManager(Path(cfg.get("master_key_file", "./adapter.key")))
-        enc = encrypt_string(km, cfg["raw_password"])  # dict {v,alg,nonce,ct}
-        # gravar como STRING JSON (TOML-safe), para compat com TokenManager
+        enc = encrypt_string(km, cfg["raw_password"])
+
         cfg["magistrala_user_password_enc_json"] = json.dumps(
             enc, separators=(",", ":"), ensure_ascii=True
         )
@@ -106,7 +153,6 @@ def _load_thresholds_from_json(
                 continue
 
             if "*" in key or "?" in key:
-                # converte wildcard para regex ancorado
                 rx = "^" + re.escape(key).replace("\\*", ".*").replace("\\?", ".") + "$"
                 try:
                     pats.append((re.compile(rx), {"min": vmin, "max": vmax}, key))
@@ -137,8 +183,10 @@ def _find_threshold(
     return None
 
 
-def _publish_alert_once(addr: str, topic: str, payload: str, qos: int = 0) -> bool:
-    """Publica um alerta em um publish 'one-shot' usando paho-mqtt. Retorna True se conseguiu."""
+def _publish_alert_once(
+    addr: str, topic: str, payload: str, qos: int = 0, timeout: float = 3.0
+) -> bool:
+    """Publica um alerta MQTT 'one-shot' e aguarda a confirmação do publish."""
     try:
         import paho.mqtt.client as mqtt
     except Exception:
@@ -147,29 +195,46 @@ def _publish_alert_once(addr: str, topic: str, payload: str, qos: int = 0) -> bo
 
     host, port, use_tls = _parse_mqtt_url(addr)
     client_id = f"adapter-alerts-{os.getpid()}-{int(time.time()*1000)%100000}"
+
     cli = mqtt.Client(client_id=client_id, clean_session=True, protocol=mqtt.MQTTv311)
     if use_tls:
         try:
-            cli.tls_set()  # default CA
-        except Exception:
-            pass
+            cli.tls_set()  # usa CA do sistema
+        except Exception as e:
+            logger.debug("tls_set falhou (prosseguindo sem custom CA): %s", e)
 
     try:
+        logger.debug(
+            "MQTT alert connect %s:%s tls=%s topic=%s", host, port, use_tls, topic
+        )
         cli.connect(host, port, keepalive=10)
-        rc, mid = cli.publish(topic, payload, qos=qos, retain=False)
-        # processa um loop curtinho só para garantir envio
-        t0 = time.time()
-        while (
-            rc == mqtt.MQTT_ERR_SUCCESS
-            and not cli._out_messages.empty()
-            and (time.time() - t0) < 2.0
-        ):
-            cli.loop(timeout=0.1)
+        cli.loop_start()
+
+        info = cli.publish(topic, payload=payload, qos=qos, retain=False)
+        ok = info.wait_for_publish(timeout=timeout) and (
+            info.rc == mqtt.MQTT_ERR_SUCCESS
+        )
+
+        cli.loop_stop()
         cli.disconnect()
-        return True
+
+        if ok:
+            logger.debug(
+                "alerta MQTT publicado com sucesso em %s:%s → %s", host, port, topic
+            )
+        else:
+            logger.warning(
+                "falha ao publicar alerta MQTT (timeout/rc) em %s:%s → %s (rc=%s)",
+                host,
+                port,
+                topic,
+                getattr(info, "rc", "?"),
+            )
+        return ok
     except Exception as e:
         logger.warning("falha ao publicar alerta MQTT em %s (%s): %s", addr, topic, e)
         try:
+            cli.loop_stop()
             cli.disconnect()
         except Exception:
             pass
@@ -180,7 +245,7 @@ def main() -> None:
     cfg_path = Path(os.environ.get("ADAPTER_CONFIG", "./config.toml"))
     cfg: Dict[str, Any] = load_config(cfg_path)
 
-    setup_logging(cfg.get("log_level", "info"))
+    setup_logging_from_cfg(cfg)
     logger.info("iniciando adapter…")
 
     # 0) bootstrap da senha, se ainda estiver em plaintext
@@ -193,12 +258,10 @@ def main() -> None:
     store = EntitiesStore(
         Path(cfg.get("entities_json_path", "./entities.json")), key_manager=km
     )
-    registry = Registry(
-        cfg=cfg, key_manager=km, store=store, cfg_path=cfg_path
-    )  # Registry espera cfg_path p/ TokenManager persistir
+    registry = Registry(cfg=cfg, key_manager=km, store=store, cfg_path=cfg_path)
     publisher = HttpPublisher(cfg=cfg)
 
-    # --------- Quality/Alerts state (mutável p/ hot-reload sem nonlocal) ----------
+    # --------- Quality/Alerts state (mutável p/ hot-reload) ----------
     qstate: Dict[str, Any] = {}
     qstate["quality_enable"] = bool(cfg.get("quality_enable", True))
     qstate["quality_alerts_enable"] = bool(cfg.get("quality_alerts_enable", True))
@@ -215,11 +278,11 @@ def main() -> None:
     qstate["th_exact"] = th_exact
     qstate["th_pats"] = th_pats
 
-    # 2) SIGHUP → hot-reload de campos seguros (incluindo quality/alerts)
+    # 2) SIGHUP → hot-reload
     _last_reload = 0.0
 
     def on_sighup(signum, frame):
-        nonlocal _last_reload, cfg  # <- apenas estas duas variáveis (as demais estão em qstate)
+        nonlocal _last_reload, cfg
         now = time.time()
         debounce = cfg.get("reload_debounce_ms", 3000) / 1000.0
         if now - _last_reload < debounce:
@@ -227,7 +290,7 @@ def main() -> None:
         _last_reload = now
         new_cfg = load_config(cfg_path)
 
-        # aplicar config geral
+        # campos gerais
         for k in (
             "log_level",
             "mqtt_topics",
@@ -240,9 +303,9 @@ def main() -> None:
         ):
             if k in new_cfg:
                 cfg[k] = new_cfg[k]
-        setup_logging(cfg.get("log_level", "info"))
+        setup_logging_from_cfg(cfg)
 
-        # aplicar quality/alerts
+        # quality/alerts
         qstate["quality_enable"] = bool(
             new_cfg.get("quality_enable", qstate["quality_enable"])
         )
@@ -292,11 +355,11 @@ def main() -> None:
                 logger.warning("ensure_client falhou: %s", ensured.error)
                 return
 
-            # 3.2 montar bt
+            # 3.2 montar bt (segundos) com janela de aceitação
             now = int(recv_ts)
             bt = now
-            bt_meta = (norm.meta or {}).get("bt") if norm.meta else None
             accept_skew = int(cfg.get("ul_bt_accept_seconds", 600))
+            bt_meta = (norm.meta or {}).get("bt") if norm.meta else None
             if isinstance(bt_meta, (int, float)):
                 cand = int(bt_meta)
                 if abs(cand - now) <= accept_skew:
@@ -319,17 +382,14 @@ def main() -> None:
                     try:
                         name = it.get("n")
                         val = it.get("v")
-                        if name is None:
-                            continue
-                        # apenas numéricos
-                        if not isinstance(val, (int, float)):
+                        if name is None or not isinstance(val, (int, float)):
                             continue
                         found = _find_threshold(th_e, th_p, name)
                         if not found:
                             continue
-                        vmin, vmax, src = found
+                        vmin, vmax, _src = found
                         if (val < vmin) or (val > vmax):
-                            # log legível p/ LLMs / monitoramento
+                            # Log legível p/ LLMs / monitoramento:
                             logger.warning(
                                 "Parameter out of range for entity %s: %s=%s (min=%s max=%s) sensor=%s",
                                 external_id,
@@ -339,7 +399,7 @@ def main() -> None:
                                 vmax,
                                 meta.get("sensor", "-"),
                             )
-                            # publicar alerta via MQTT (se habilitado)
+                            # Publicar alerta via MQTT (se habilitado)
                             if qstate.get("quality_alerts_enable", True):
                                 alert = {
                                     "type": "threshold_violation",
@@ -352,10 +412,7 @@ def main() -> None:
                                     "bt": bt,
                                     "ts": int(time.time()),
                                 }
-                                topic_base = qstate.get(
-                                    "alerts_topic_base", "adapter/alerts"
-                                )
-                                topic = f"{topic_base}/{external_id}"
+                                topic = f"{qstate['alerts_topic_base']}"
                                 ok_pub = _publish_alert_once(
                                     qstate.get("alerts_addr", "tcp://127.0.0.1:1883"),
                                     topic,
