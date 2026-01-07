@@ -167,17 +167,14 @@ class Registry:
     def _cli_clients_connect(
         self, client_id: str, channel_id: str, domain_id: str, token: str
     ) -> bool:
-        """
-        Conecta cliente ao canal com permissões adequadas.
-        """
         cli = self._cli_path()
         perms_try = ['["publish","subscribe"]', '["messages"]']
         for perms in perms_try:
             args = [
                 cli,
                 "clients",
-                "connect",
                 client_id,
+                "connect",
                 channel_id,
                 perms,
                 domain_id,
@@ -222,7 +219,7 @@ class Registry:
         Retorna uma lista de dicts de clientes.
         """
         cli = self._cli_path()
-        base = [cli, "clients", "get", "all", domain_id, token]
+        base = [cli, "clients", "all", "get", domain_id, token]
         variants: List[List[str]] = []
 
         if name:
