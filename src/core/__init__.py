@@ -5,5 +5,8 @@ __all__ = [
     "storage",
     "registry",
     "publisher",
+    "atom_client",
+    "api",
+    "senml",
     "mqtt",
 ]

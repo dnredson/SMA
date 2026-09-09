@@ -155,7 +155,12 @@ def parse_chirpstack_json(js: dict) -> tuple[str, list[dict], dict]:
     entries, meta = ([], {})
     if ul:
         try:
-            entries, meta = parse_ultralight_line(ul)
+            # Use the typed Greenstick parser when available. The generic UL
+            # parser is retained for unknown keys, but M#/T#/C# must keep the
+            # canonical soil names used by the quality rules and SenML output.
+            from .greenstick_ul import parse as parse_greenstick_ul
+
+            entries, meta = parse_greenstick_ul(ul)
         except Exception:
             entries, meta = [], {}
 

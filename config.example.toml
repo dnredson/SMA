@@ -1,4 +1,6 @@
-# Runtime example. Prefer environment variables for credentials.
+# SmartAdapter configuration for Magistrala + Atom.
+# Keep runtime credentials in environment variables, not in this file.
+
 atom_url = "http://localhost:8080"
 atom_graphql_url = "http://localhost:8080/graphql"
 atom_tenant_id = "replace-with-atom-tenant-id"
@@ -6,6 +8,8 @@ atom_channel_id = "replace-with-atom-channel-id"
 atom_manage_policies = true
 atom_timeout_ms = 10000
 
+# FluxMQ HTTP adapter. The modern route is:
+# POST /<tenant_id>/channels/<channel_id>/messages
 http_adapter_url = "http://localhost:8008"
 publish_timeout_ms = 5000
 
@@ -14,16 +18,13 @@ mqtt_topics = ["#"]
 
 api_host = "127.0.0.1"
 api_port = 8081
+# Set api_token or ADAPTER_API_TOKEN to protect the CRUD API.
 api_token = ""
 
 entities_json_path = "./entities.json"
 master_key_file = "./adapter.key"
-log_file = ""
 log_level = "info"
-log_max_bytes = 10485760
-log_backup_count = 3
-rotate_on_boot = false
-reload_debounce_ms = 3000
+log_file = ""
 senml_max_batch = 100
 batch_flush_ms = 200
 max_retries = 3
