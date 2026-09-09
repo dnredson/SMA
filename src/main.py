@@ -8,11 +8,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.config import load_config, write_config_atomic
-from core.crypto import KeyManager, encrypt_string
+from core.config import load_config
 from core.storage import EntitiesStore
 from core.registry import Registry, EnsureResult
 from core.publisher import HttpPublisher
+from core.api import start_api_server
+from core.senml import build_senml
 from core.mqtt import run_mqtt_loop
 from parsers import detect_and_parse, NormalizeResult
 
@@ -71,23 +72,6 @@ def setup_logging_from_cfg(cfg: Dict[str, Any]) -> None:
                 except Exception:
                     pass
                 break
-
-
-def bootstrap_password(cfg_path: Path) -> None:
-    """1ª execução: lê raw_password, cifra e limpa o plaintext no TOML."""
-    cfg = load_config(cfg_path)
-    if cfg.get("raw_password"):
-        km = KeyManager(Path(cfg.get("master_key_file", "./adapter.key")))
-        enc = encrypt_string(km, cfg["raw_password"])
-
-        cfg["magistrala_user_password_enc_json"] = json.dumps(
-            enc, separators=(",", ":"), ensure_ascii=True
-        )
-        cfg["raw_password"] = ""
-        if "magistrala_user_password_enc" in cfg:
-            del cfg["magistrala_user_password_enc"]
-        write_config_atomic(cfg_path, cfg)
-        logger.info("raw_password cifrada e removida do config.toml")
 
 
 # -------------------- Quality/Alerts helpers --------------------
@@ -248,18 +232,13 @@ def main() -> None:
     setup_logging_from_cfg(cfg)
     logger.info("iniciando adapter…")
 
-    # 0) bootstrap da senha, se ainda estiver em plaintext
-    if cfg.get("raw_password"):
-        bootstrap_password(cfg_path)
-        cfg = load_config(cfg_path)
-
     # 1) serviços
-    km = KeyManager(Path(cfg.get("master_key_file", "./adapter.key")))
     store = EntitiesStore(
-        Path(cfg.get("entities_json_path", "./entities.json")), key_manager=km
+        Path(cfg.get("entities_json_path", "./entities.json")), key_manager=None
     )
-    registry = Registry(cfg=cfg, key_manager=km, store=store, cfg_path=cfg_path)
+    registry = Registry(cfg=cfg, key_manager=None, store=store, cfg_path=cfg_path)
     publisher = HttpPublisher(cfg=cfg)
+    start_api_server(registry, cfg)
 
     # --------- Quality/Alerts state (mutável p/ hot-reload) ----------
     qstate: Dict[str, Any] = {}
@@ -436,21 +415,15 @@ def main() -> None:
                             "falha ao avaliar thresholds para item %s: %s", it, e
                         )
 
-            # 3.4 construir SenML (primeiro item leva bn/bt)
-            bn = external_id + ":"
-            if entries:
-                first = dict(entries[0])
-                first["bn"] = bn
-                first["bt"] = bt
-                senml = [first] + entries[1:]
-            else:
-                senml = [{"bn": bn, "bt": bt}]
+            # 3.4 construir SenML canônico (primeiro item leva bn/bt)
+            senml = build_senml(external_id, entries, bt)
 
             # 3.5 publicar no HTTP Adapter
             ok, err = publisher.publish(
-                domain_id=ensured.domain_id,
+                tenant_id=ensured.tenant_id,
                 channel_id=ensured.channel_id,
-                client_secret=ensured.client_secret,
+                device_id=ensured.device_id,
+                atom_token=registry.atom.token,
                 senml=senml,
                 subtopic="",  # sem subtopic
             )

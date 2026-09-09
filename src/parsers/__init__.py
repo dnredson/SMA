@@ -103,7 +103,7 @@ def detect_and_parse(topic: str, payload: bytes) -> NormalizeResult:
             except Exception:
                 return NormalizeResult(False)
         if s.startswith("S|") or s.startswith("|"):
-            entries, meta = greenstick_common.parse_ultralight_line(s)
+            entries, meta = greenstick_ul.parse(s)
             return NormalizeResult(True, external_id, entries, meta)
         return NormalizeResult(False)
 
@@ -116,7 +116,7 @@ def detect_and_parse(topic: str, payload: bytes) -> NormalizeResult:
             except Exception:
                 return NormalizeResult(False)
         if s.startswith("S|") or s.startswith("|"):
-            entries, meta = greenstick_common.parse_ultralight_line(s)
+            entries, meta = greenstick_ul.parse(s)
             return NormalizeResult(True, external_id, entries, meta)
         return NormalizeResult(False)
     # --- TTN JSON envelope (ultralight dentro) ---

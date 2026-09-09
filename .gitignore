@@ -9,6 +9,11 @@ __pycache__/
 *.pyc
 .venv/
 
+# SmartAdapter runtime state and credentials
+adapter.key
+entities.json
+config.local.toml
+
 # Node/Build (se houver)
 node_modules/
 dist/
