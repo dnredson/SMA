@@ -25,6 +25,7 @@ def render_prometheus_metrics(status: Mapping[str, Any], *, ready: bool) -> str:
     queues = dict(status.get("queues") or {})
     devices = dict(status.get("devices") or {})
     quality = dict(status.get("quality") or {})
+    catalog = dict(status.get("catalog") or {})
     runtime = dict(status.get("runtime") or {})
     inputs = list(status.get("inputs") or [])
 
@@ -83,6 +84,17 @@ def render_prometheus_metrics(status: Mapping[str, Any], *, ready: bool) -> str:
     )
     for state in ("valid", "degraded", "invalid", "unknown"):
         lines.append(f'sma_device_quality{{status="{state}"}} {_num(quality.get(state, 0))}')
+
+    lines.extend(
+        [
+            "# HELP sma_catalog_lifecycle Catalog nodes by lifecycle state.",
+            "# TYPE sma_catalog_lifecycle gauge",
+        ]
+    )
+    for state in ("planned", "observed", "managed", "decommissioned"):
+        lines.append(
+            f'sma_catalog_lifecycle{{state="{state}"}} {_num(catalog.get(state, 0))}'
+        )
 
     lines.extend(
         [
