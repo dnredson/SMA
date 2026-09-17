@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from smarter_adapter.inputs import MQTTInputConfig
+from smarter_adapter.irrigap_config import load_irrigap_catalog
 from smarter_adapter.legacy_parser import LegacySensorParser
 from smarter_adapter.observer import MQTTObserver
 from smarter_adapter.parsers import IrrigapChirpStackParser
@@ -34,9 +35,16 @@ def main() -> int:
     max_parsed = int(env("SMA_OBSERVE_MAX", "5"))
     timeout = float(env("SMA_OBSERVE_TIMEOUT", "180"))
 
+    catalog = load_irrigap_catalog(
+        file_path=env(
+            "SMA_IRRIGAP_NODES_FILE",
+            str(ROOT / "config" / "irrigap.nodes.json"),
+        ),
+        inline_json=env("SMA_IRRIGAP_NODES_JSON"),
+    )
     pipeline = ParsePipeline(
         ParserRegistry([
-            IrrigapChirpStackParser(),
+            IrrigapChirpStackParser(catalog.nodes),
             LegacySensorParser(),
         ])
     )
@@ -101,6 +109,7 @@ def main() -> int:
     print("Smarter Adapter 2.0 MQTT observer (READ ONLY)")
     print(f"Broker:    {host}:{port}")
     print(f"Topic:     {topic}")
+    print(f"Catalog:   {catalog.source} nodes={len(catalog.nodes)}")
     print(f"Target:    {max_parsed} parsed message(s)")
     print(f"Timeout:   {timeout:.0f}s")
     print("Writes:    DISABLED (no Atom / no FluxMQ / no Timescale writes)")
