@@ -238,10 +238,6 @@ class BindingSQLiteManagementStore(SQLiteManagementStore):
         seen = float(time.time() if observed_at is None else observed_at)
         body = dict(metadata or {})
 
-        # Keep the weaker physical observation in sync as well. This also
-        # backfills lifecycle information for callers that only use the older
-        # managed binding API. The upsert is monotonic, so replayed event times
-        # cannot move last_observed_at backwards.
         self.observe_catalog_node(
             workspace_id,
             channel_id,
@@ -252,6 +248,7 @@ class BindingSQLiteManagementStore(SQLiteManagementStore):
             observed_at=seen,
         )
 
+        encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -260,10 +257,19 @@ class BindingSQLiteManagementStore(SQLiteManagementStore):
                     sensor, metadata_json, observed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id, channel_id, external_id) DO UPDATE SET
-                    node_id = excluded.node_id,
-                    sensor = excluded.sensor,
-                    metadata_json = excluded.metadata_json,
-                    observed_at = excluded.observed_at
+                    node_id = CASE
+                        WHEN excluded.observed_at >= managed_device_observations.observed_at
+                        THEN excluded.node_id ELSE managed_device_observations.node_id END,
+                    sensor = CASE
+                        WHEN excluded.observed_at >= managed_device_observations.observed_at
+                        THEN excluded.sensor ELSE managed_device_observations.sensor END,
+                    metadata_json = CASE
+                        WHEN excluded.observed_at >= managed_device_observations.observed_at
+                        THEN excluded.metadata_json ELSE managed_device_observations.metadata_json END,
+                    observed_at = MAX(
+                        managed_device_observations.observed_at,
+                        excluded.observed_at
+                    )
                 """,
                 (
                     str(workspace_id),
@@ -271,7 +277,7 @@ class BindingSQLiteManagementStore(SQLiteManagementStore):
                     str(external_id),
                     key,
                     str(sensor or ""),
-                    json.dumps(body, ensure_ascii=False, separators=(",", ":")),
+                    encoded,
                     seen,
                 ),
             )
@@ -375,8 +381,6 @@ class BoundIrrigapCatalogManager(IrrigapCatalogManager):
             item.update(dict(binding))
             item["managed"] = True
             item["lifecycle_state"] = "managed"
-            # A legacy database may contain a managed binding that predates the
-            # independent observation table. Managed implies observed.
             item["observed"] = True
             if item.get("observed_external_id") is None:
                 item["observed_external_id"] = binding.get("external_id")
