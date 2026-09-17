@@ -12,6 +12,14 @@ except ImportError:  # pragma: no cover - exercised only without optional depend
     mqtt = None
 
 
+def _reason_code_value(value) -> int:
+    raw = getattr(value, "value", value)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 1
+
+
 @dataclass(frozen=True)
 class MQTTInputConfig:
     host: str
@@ -85,13 +93,13 @@ class MQTTInput:
         return self._last_error
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
-        code = int(reason_code)
+        code = _reason_code_value(reason_code)
         if code != 0:
             self._last_error = f"MQTT connect failed with reason code {code}"
             self._connected.clear()
             return
         result, _mid = client.subscribe(self.config.topic, qos=self.config.qos)
-        if result != 0:
+        if int(result) != 0:
             self._last_error = f"MQTT subscribe failed with result {result}"
             self._connected.clear()
             return
@@ -107,7 +115,7 @@ class MQTTInput:
         properties=None,
     ):
         self._connected.clear()
-        code = int(reason_code)
+        code = _reason_code_value(reason_code)
         if code != 0 and not self._stopped.is_set():
             self._last_error = f"MQTT disconnected with reason code {code}"
 
