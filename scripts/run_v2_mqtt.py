@@ -25,6 +25,7 @@ from smarter_adapter.magistrala.publisher import FluxMQPublisher
 from smarter_adapter.parsers import IrrigapChirpStackParser
 from smarter_adapter.pipeline import ParsePipeline
 from smarter_adapter.plugins import ParserRegistry
+from smarter_adapter.presence import DevicePresencePolicy
 from smarter_adapter.reliability import RetryPolicy
 from smarter_adapter.runtime import RuntimeConfig, SmarterAdapterRuntime
 from smarter_adapter.service import SmarterAdapterService
@@ -192,6 +193,10 @@ def main() -> int:
         poll_interval_seconds=float(env("SMA_RETRY_POLL_INTERVAL", "0.5")),
         batch_size=int(env("SMA_RETRY_BATCH_SIZE", "50")),
     )
+    presence_policy = DevicePresencePolicy(
+        stale_after_seconds=float(env("SMA_DEVICE_STALE_AFTER", "300")),
+        offline_after_seconds=float(env("SMA_DEVICE_OFFLINE_AFTER", "1800")),
+    )
     service = SmarterAdapterService(
         runtime,
         configs,
@@ -221,6 +226,11 @@ def main() -> int:
         print(f"Reader:    {reader_url}")
         print(f"API:       http://{api_host}:{api_port}")
         print(
+            "Presence:  "
+            f"stale>{presence_policy.stale_after_seconds}s "
+            f"offline>{presence_policy.offline_after_seconds}s"
+        )
+        print(
             "Retry:     "
             f"max={retry_policy.max_attempts} base={retry_policy.base_delay_seconds}s "
             f"max_delay={retry_policy.max_delay_seconds}s"
@@ -237,6 +247,7 @@ def main() -> int:
             runtime=runtime,
             store=state_store,
             reader=reader,
+            presence_policy=presence_policy,
             api_token=api_token,
         )
         assert runtime.base is not None
