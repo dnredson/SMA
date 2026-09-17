@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from .intelligence import LLMContextBuilder
-from .magistrala.reader import ReaderError
 
 
 @dataclass(frozen=True)
@@ -120,15 +119,18 @@ class TimescaleHistoryProvider:
 
         # Generic trend classification, intentionally conservative. This is a
         # descriptive direction, not a domain alarm: threshold rules remain the
-        # authority for alerts.
-        scale = max(abs(first_value), abs(last_value), abs(mean), 1.0)
-        tolerance = scale * 0.01
-        if abs(delta) <= tolerance:
-            direction = "stable"
-        elif delta > 0:
-            direction = "increasing"
+        # authority for alerts. One sample is never called a trend.
+        if len(ordered) < 2 or last_at <= first_at:
+            direction = "insufficient"
         else:
-            direction = "decreasing"
+            scale = max(abs(first_value), abs(last_value), abs(mean), 1.0)
+            tolerance = scale * 0.01
+            if abs(delta) <= tolerance:
+                direction = "stable"
+            elif delta > 0:
+                direction = "increasing"
+            else:
+                direction = "decreasing"
 
         return TrendSeries(
             name=name,
@@ -351,6 +353,10 @@ class AsyncIntelligenceSideChannel:
     @property
     def queue_size(self) -> int:
         return self._queue.qsize()
+
+    @property
+    def max_queue(self) -> int:
+        return self._queue.maxsize
 
     def _warn(self, message: str) -> None:
         if self.on_warning is not None:
