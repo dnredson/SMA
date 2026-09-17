@@ -14,7 +14,13 @@ sys.path.insert(0, str(ROOT / "src"))
 from smarter_adapter.inputs import MQTTInputConfig
 from smarter_adapter.legacy_parser import LegacySensorParser
 from smarter_adapter.management import start_management_server
-from smarter_adapter.magistrala import AtomClient, AtomConfig, ControlPlane, RulesClient
+from smarter_adapter.magistrala import (
+    AtomClient,
+    AtomConfig,
+    ControlPlane,
+    RulesClient,
+    TimescaleReaderClient,
+)
 from smarter_adapter.magistrala.publisher import FluxMQPublisher
 from smarter_adapter.parsers import IrrigapChirpStackParser
 from smarter_adapter.pipeline import ParsePipeline
@@ -27,6 +33,31 @@ from smarter_adapter.storage import SQLiteManagementStore
 
 def env(name: str, default: str = "") -> str:
     return str(os.getenv(name, default)).strip()
+
+
+def environment_defaults(name: str) -> dict[str, str]:
+    normalized = str(name or "test").strip().lower()
+    if normalized in ("irrigap", "field", "production", "prod"):
+        return {
+            "environment": "irrigap",
+            "workspace_name": "Irrigap",
+            "workspace_alias": "irrigap",
+            "channel_name": "Telemetry",
+            "channel_alias": "telemetry",
+            "state_db": str(ROOT / ".state" / "smarter_adapter-irrigap.sqlite3"),
+        }
+    if normalized in ("test", "dev", "development"):
+        return {
+            "environment": "test",
+            "workspace_name": "Smarter Adapter Test",
+            "workspace_alias": "smarter-adapter-test",
+            "channel_name": "Telemetry",
+            "channel_alias": "telemetry",
+            "state_db": str(ROOT / ".state" / "smarter_adapter-test.sqlite3"),
+        }
+    raise RuntimeError(
+        "SMA_ENVIRONMENT must be one of: test, dev, irrigap, field, production, prod"
+    )
 
 
 def mqtt_inputs() -> tuple[MQTTInputConfig, ...]:
@@ -80,9 +111,12 @@ def mqtt_inputs() -> tuple[MQTTInputConfig, ...]:
 
 
 def main() -> int:
+    deployment = environment_defaults(env("SMA_ENVIRONMENT", "test"))
+
     atom_url = env("ATOM_URL", "http://127.0.0.1")
     publish_url = env("MAGISTRALA_PUBLISH_URL", atom_url)
     rules_url = env("MAGISTRALA_RULES_URL", atom_url)
+    reader_url = env("MAGISTRALA_READER_URL", "http://127.0.0.1:9011")
     token = env("ATOM_SERVICE_TOKEN") or env("ATOM_ADMIN_TOKEN") or env("ATOM_TOKEN")
     username = env("ATOM_USERNAME", "admin")
     password = env("ATOM_PASSWORD")
@@ -102,24 +136,30 @@ def main() -> int:
     control = ControlPlane(atom)
     rules = RulesClient(rules_url, atom.token, invalidate_token=atom.tokens.invalidate)
     publisher = FluxMQPublisher(publish_url, atom.token, invalidate_token=atom.tokens.invalidate)
+    reader = TimescaleReaderClient(
+        reader_url,
+        atom.token,
+        invalidate_token=atom.tokens.invalidate,
+    )
 
     parsers = ParserRegistry([IrrigapChirpStackParser(), LegacySensorParser()])
     pipeline = ParsePipeline(parsers)
 
-    state_path = Path(env("SMA_STATE_DB", str(ROOT / ".state" / "smarter_adapter.sqlite3")))
+    state_path = Path(env("SMA_STATE_DB", deployment["state_db"]))
     state_store = SQLiteManagementStore(state_path)
+    runtime_config = RuntimeConfig(
+        workspace_name=env("SMA_WORKSPACE_NAME", deployment["workspace_name"]),
+        workspace_alias=env("SMA_WORKSPACE_ALIAS", deployment["workspace_alias"]),
+        channel_name=env("SMA_CHANNEL_NAME", deployment["channel_name"]),
+        channel_alias=env("SMA_CHANNEL_ALIAS", deployment["channel_alias"]),
+        persistence_rule_name=env("SMA_PERSISTENCE_RULE_NAME", "smarter-adapter-save-senml"),
+    )
     runtime = SmarterAdapterRuntime(
         pipeline=pipeline,
         control=control,
         rules=rules,
         publisher=publisher,
-        config=RuntimeConfig(
-            workspace_name=env("SMA_WORKSPACE_NAME", "Smarter Adapter Test"),
-            workspace_alias=env("SMA_WORKSPACE_ALIAS", "smarter-adapter-test"),
-            channel_name=env("SMA_CHANNEL_NAME", "Telemetry"),
-            channel_alias=env("SMA_CHANNEL_ALIAS", "telemetry"),
-            persistence_rule_name=env("SMA_PERSISTENCE_RULE_NAME", "smarter-adapter-save-senml"),
-        ),
+        config=runtime_config,
         state_store=state_store,
     )
 
@@ -162,10 +202,14 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
 
     try:
+        print(f"Environment:{deployment['environment']}")
         print(f"State DB:  {state_path}")
+        print(f"Workspace: {runtime_config.workspace_name} ({runtime_config.workspace_alias})")
+        print(f"Channel:   {runtime_config.channel_name} ({runtime_config.channel_alias})")
         print(f"Atom:      {atom_url}")
         print(f"Publish:   {publish_url}")
         print(f"Rules:     {rules_url}")
+        print(f"Reader:    {reader_url}")
         print(f"API:       http://{api_host}:{api_port}")
         print(
             "Retry:     "
@@ -183,13 +227,14 @@ def main() -> int:
             service=service,
             runtime=runtime,
             store=state_store,
+            reader=reader,
             api_token=api_token,
         )
         assert runtime.base is not None
         assert runtime.persistence_rule is not None
-        print(f"Workspace: {runtime.base.workspace.id}")
-        print(f"Channel:   {runtime.base.channel.id}")
-        print(f"Rule:      {runtime.persistence_rule.id}")
+        print(f"Workspace ID: {runtime.base.workspace.id}")
+        print(f"Channel ID:   {runtime.base.channel.id}")
+        print(f"Rule:         {runtime.persistence_rule.id}")
         print("RUNNING: Ctrl+C to stop", flush=True)
         stop.wait()
     finally:
