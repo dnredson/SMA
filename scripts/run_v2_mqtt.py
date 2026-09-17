@@ -11,29 +11,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from smarter_adapter.catalog_binding import (
-    BindingSQLiteManagementStore,
-    BoundIrrigapCatalogManager,
+from smarter_adapter.device_lifecycle import (
+    DeviceLifecycleController,
+    LifecycleBindingSQLiteManagementStore,
+    LifecycleIrrigapCatalogManager,
+    LifecycleSmarterAdapterRuntime,
 )
 from smarter_adapter.inputs import MQTTInputConfig
 from smarter_adapter.irrigap_config import load_irrigap_catalog
 from smarter_adapter.legacy_parser import LegacySensorParser
-from smarter_adapter.management import start_management_server
-from smarter_adapter.magistrala import (
-    AtomClient,
-    AtomConfig,
-    ControlPlane,
-    RulesClient,
-    TimescaleReaderClient,
-)
+from smarter_adapter.lifecycle_management import start_lifecycle_management_server
+from smarter_adapter.lifecycle_service import LifecycleSmarterAdapterService
+from smarter_adapter.magistrala import AtomConfig, ControlPlane, RulesClient, TimescaleReaderClient
+from smarter_adapter.magistrala.lifecycle import LifecycleAtomClient
 from smarter_adapter.magistrala.publisher import FluxMQPublisher
 from smarter_adapter.parsers import IrrigapChirpStackParser
 from smarter_adapter.pipeline import ParsePipeline
 from smarter_adapter.plugins import ParserRegistry
 from smarter_adapter.presence import DevicePresencePolicy
 from smarter_adapter.reliability import RetryPolicy
-from smarter_adapter.runtime import RuntimeConfig, SmarterAdapterRuntime
-from smarter_adapter.service import SmarterAdapterService
+from smarter_adapter.runtime import RuntimeConfig
 
 
 def env(name: str, default: str = "") -> str:
@@ -131,7 +128,7 @@ def main() -> int:
         print("ERROR: set ATOM_SERVICE_TOKEN/ATOM_ADMIN_TOKEN or ATOM_PASSWORD", file=sys.stderr)
         return 2
 
-    atom = AtomClient(
+    atom = LifecycleAtomClient(
         AtomConfig(
             base_url=atom_url,
             graphql_url=env("ATOM_GRAPHQL_URL"),
@@ -157,7 +154,7 @@ def main() -> int:
         file_path=catalog_file,
         inline_json=catalog_inline,
     )
-    catalog_manager = BoundIrrigapCatalogManager(
+    catalog_manager = LifecycleIrrigapCatalogManager(
         irrigap_catalog,
         file_path=catalog_file if catalog_file and not catalog_inline else "",
     )
@@ -170,7 +167,7 @@ def main() -> int:
     pipeline = ParsePipeline(parsers)
 
     state_path = Path(env("SMA_STATE_DB", deployment["state_db"]))
-    state_store = BindingSQLiteManagementStore(state_path)
+    state_store = LifecycleBindingSQLiteManagementStore(state_path)
     runtime_config = RuntimeConfig(
         workspace_name=env("SMA_WORKSPACE_NAME", deployment["workspace_name"]),
         workspace_alias=env("SMA_WORKSPACE_ALIAS", deployment["workspace_alias"]),
@@ -178,7 +175,7 @@ def main() -> int:
         channel_alias=env("SMA_CHANNEL_ALIAS", deployment["channel_alias"]),
         persistence_rule_name=env("SMA_PERSISTENCE_RULE_NAME", "smarter-adapter-save-senml"),
     )
-    runtime = SmarterAdapterRuntime(
+    runtime = LifecycleSmarterAdapterRuntime(
         pipeline=pipeline,
         control=control,
         rules=rules,
@@ -208,6 +205,13 @@ def main() -> int:
 
     def on_error(exc):
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    def on_suppressed(exc):
+        print(
+            f"SUPPRESSED lifecycle=decommissioned node={exc.node_id} "
+            f"external={exc.external_id}",
+            flush=True,
+        )
 
     configs = mqtt_inputs()
     retry_policy = RetryPolicy(
@@ -257,16 +261,34 @@ def main() -> int:
             node_id,
         )
 
+    def catalog_lifecycle(node_id: str):
+        base = runtime.base
+        if base is None:
+            return None
+        return state_store.get_node_lifecycle(
+            base.workspace.id,
+            base.channel.id,
+            node_id,
+        )
+
     catalog_manager.set_binding_resolver(catalog_binding)
     catalog_manager.set_observation_resolver(catalog_observation)
+    catalog_manager.set_lifecycle_resolver(catalog_lifecycle)
 
-    service = SmarterAdapterService(
+    service = LifecycleSmarterAdapterService(
         runtime,
         configs,
         on_result=on_result,
         on_error=on_error,
+        on_suppressed=on_suppressed,
         reliability_store=state_store,
         retry_policy=retry_policy,
+    )
+    lifecycle_controller = DeviceLifecycleController(
+        runtime=runtime,
+        store=state_store,
+        catalog=catalog_manager,
+        atom=atom,
     )
 
     api_host = env("SMA_API_HOST", "127.0.0.1")
@@ -308,12 +330,13 @@ def main() -> int:
             print(f"Input {index}: {config.host}:{config.port} topic={config.topic} source={config.source}")
         print("Bootstrapping and starting inputs...")
         service.start()
-        management = start_management_server(
+        management = start_lifecycle_management_server(
             host=api_host,
             port=api_port,
             service=service,
             runtime=runtime,
             store=state_store,
+            lifecycle_controller=lifecycle_controller,
             reader=reader,
             presence_policy=presence_policy,
             catalog_manager=catalog_manager,
@@ -339,7 +362,8 @@ def main() -> int:
             "STOPPED "
             f"received={stats.received} processed={stats.processed} failed={stats.failed} "
             f"queued={stats.queued} retried={stats.retried} recovered={stats.recovered} "
-            f"dead_lettered={stats.dead_lettered} pending_retry={pending_retry} dlq={pending_dlq}"
+            f"dead_lettered={stats.dead_lettered} suppressed={stats.suppressed} "
+            f"pending_retry={pending_retry} dlq={pending_dlq}"
         )
     return 0
 
