@@ -5,9 +5,10 @@ import logging
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .magistrala.reader import ReaderError, TimescaleReaderClient
 from .reliability import DeliveryQueueStore
 from .runtime import SmarterAdapterRuntime
 from .service import SmarterAdapterService
@@ -32,6 +33,10 @@ class _Handler(BaseHTTPRequestHandler):
     @property
     def store(self) -> DeliveryQueueStore:
         return self.server.store  # type: ignore[attr-defined]
+
+    @property
+    def reader(self) -> Optional[TimescaleReaderClient]:
+        return self.server.reader  # type: ignore[attr-defined]
 
     def _authorized(self) -> bool:
         expected = self.server.api_token  # type: ignore[attr-defined]
@@ -87,6 +92,7 @@ class _Handler(BaseHTTPRequestHandler):
             "status": "ready" if ready else "not_ready",
             "runtime_ready": runtime_ready,
             "inputs_ready": inputs_ready,
+            "reader_configured": self.reader is not None,
             "inputs": inputs,
         }
 
@@ -107,6 +113,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "device_type_version_id": device_type.version_id if device_type else None,
                 "persistence_rule_id": rule.id if rule else None,
                 "device_cache_size": self.runtime.device_cache_size,
+                "reader_configured": self.reader is not None,
             },
             "inputs": [
                 {
@@ -120,6 +127,64 @@ class _Handler(BaseHTTPRequestHandler):
                 for cfg, inp in zip(self.service.input_configs, self.service.inputs)
             ],
         }
+
+    @staticmethod
+    def _device_messages_external_id(path: str) -> Optional[str]:
+        prefix = "/api/v2/devices/"
+        suffix = "/messages"
+        if not path.startswith(prefix) or not path.endswith(suffix):
+            return None
+        raw = path[len(prefix) : -len(suffix)].strip("/")
+        if not raw or "/" in raw:
+            return None
+        return unquote(raw)
+
+    def _device_messages(self, parsed, path: str) -> bool:
+        external_id = self._device_messages_external_id(path)
+        if external_id is None:
+            return False
+        if self.reader is None:
+            self._error(503, "Timescale reader is not configured")
+            return True
+        base = self.runtime.base
+        if base is None:
+            self._error(503, "runtime is not bootstrapped")
+            return True
+
+        query = parse_qs(parsed.query)
+        limit = min(max(int((query.get("limit") or [100])[0]), 1), 1000)
+        offset = max(int((query.get("offset") or [0])[0]), 0)
+        order = str((query.get("order") or ["time"])[0])
+        direction = str((query.get("dir") or ["desc"])[0])
+        name = str((query.get("name") or [""])[0])
+
+        # The management store deliberately exposes an exact lookup so this
+        # endpoint can only read telemetry for devices managed in the current
+        # workspace/channel.
+        device = self.store.find_device(  # type: ignore[attr-defined]
+            base.workspace.id,
+            base.channel.id,
+            external_id,
+        )
+        if device is None:
+            self._error(404, "managed device not found")
+            return True
+
+        page = self.reader.list_device_messages(
+            base.workspace.id,
+            base.channel.id,
+            external_id,
+            limit=limit,
+            offset=offset,
+            order=order,
+            direction=direction,
+            name=name,
+        )
+        payload = page.as_dict()
+        payload["external_id"] = external_id
+        payload["atom_device_id"] = device["atom_device_id"]
+        self._send(200, payload)
+        return True
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -138,6 +203,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            if self._device_messages(parsed, path):
+                return
+
             query = parse_qs(parsed.query)
             limit = min(max(int((query.get("limit") or [100])[0]), 1), 1000)
 
@@ -147,7 +215,7 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/api/v2/devices":
                 workspace_id = self.runtime.base.workspace.id if self.runtime.base else ""
                 channel_id = self.runtime.base.channel.id if self.runtime.base else ""
-                items = self.store.list_devices(
+                items = self.store.list_devices(  # type: ignore[attr-defined]
                     workspace_id=workspace_id,
                     channel_id=channel_id,
                     limit=limit,
@@ -165,7 +233,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "error_type": item.error_type,
                         "raw": self._raw_public(item.raw),
                     }
-                    for item in self.store.list_retries(limit=limit)
+                    for item in self.store.list_retries(limit=limit)  # type: ignore[attr-defined]
                 ]
                 self._send(200, {"total": self.store.count_retries(), "items": items})
                 return
@@ -179,13 +247,16 @@ class _Handler(BaseHTTPRequestHandler):
                         "error_type": item.error_type,
                         "raw": self._raw_public(item.raw),
                     }
-                    for item in self.store.list_dlq(limit=limit)
+                    for item in self.store.list_dlq(limit=limit)  # type: ignore[attr-defined]
                 ]
                 self._send(200, {"total": self.store.count_dlq(), "items": items})
                 return
             self._error(404, "route not found")
         except ValueError as exc:
             self._error(400, str(exc))
+        except ReaderError as exc:
+            logger.exception("Timescale reader request failed")
+            self._error(502, str(exc))
         except Exception as exc:
             logger.exception("management GET failed")
             self._error(500, str(exc))
@@ -207,7 +278,7 @@ class _Handler(BaseHTTPRequestHandler):
             if path.startswith(prefix) and path.endswith(suffix):
                 raw_id = unquote(path[len(prefix) : -len(suffix)]).strip("/")
                 item_id = int(raw_id)
-                retry_id = self.store.requeue_dlq(item_id)
+                retry_id = self.store.requeue_dlq(item_id)  # type: ignore[attr-defined]
                 if retry_id == 0:
                     self._error(404, "DLQ item not found")
                     return
@@ -232,12 +303,14 @@ class ManagementServer(ThreadingHTTPServer):
         service: SmarterAdapterService,
         runtime: SmarterAdapterRuntime,
         store: DeliveryQueueStore,
+        reader: Optional[TimescaleReaderClient] = None,
         api_token: str = "",
     ) -> None:
         super().__init__(address, _Handler)
         self.service = service
         self.runtime = runtime
         self.store = store
+        self.reader = reader
         self.api_token = api_token
 
 
@@ -248,6 +321,7 @@ def start_management_server(
     service: SmarterAdapterService,
     runtime: SmarterAdapterRuntime,
     store: DeliveryQueueStore,
+    reader: Optional[TimescaleReaderClient] = None,
     api_token: str = "",
 ) -> ManagementServer:
     server = ManagementServer(
@@ -255,6 +329,7 @@ def start_management_server(
         service=service,
         runtime=runtime,
         store=store,
+        reader=reader,
         api_token=api_token,
     )
     thread = Thread(target=server.serve_forever, name="smarter-adapter-management", daemon=True)
