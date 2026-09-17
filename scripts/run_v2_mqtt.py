@@ -11,8 +11,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from smarter_adapter.catalog_binding import (
+    BindingSQLiteManagementStore,
+    BoundIrrigapCatalogManager,
+)
 from smarter_adapter.inputs import MQTTInputConfig
-from smarter_adapter.irrigap_config import IrrigapCatalogManager, load_irrigap_catalog
+from smarter_adapter.irrigap_config import load_irrigap_catalog
 from smarter_adapter.legacy_parser import LegacySensorParser
 from smarter_adapter.management import start_management_server
 from smarter_adapter.magistrala import (
@@ -30,7 +34,6 @@ from smarter_adapter.presence import DevicePresencePolicy
 from smarter_adapter.reliability import RetryPolicy
 from smarter_adapter.runtime import RuntimeConfig, SmarterAdapterRuntime
 from smarter_adapter.service import SmarterAdapterService
-from smarter_adapter.storage import SQLiteManagementStore
 
 
 def env(name: str, default: str = "") -> str:
@@ -154,7 +157,7 @@ def main() -> int:
         file_path=catalog_file,
         inline_json=catalog_inline,
     )
-    catalog_manager = IrrigapCatalogManager(
+    catalog_manager = BoundIrrigapCatalogManager(
         irrigap_catalog,
         file_path=catalog_file if catalog_file and not catalog_inline else "",
     )
@@ -167,7 +170,7 @@ def main() -> int:
     pipeline = ParsePipeline(parsers)
 
     state_path = Path(env("SMA_STATE_DB", deployment["state_db"]))
-    state_store = SQLiteManagementStore(state_path)
+    state_store = BindingSQLiteManagementStore(state_path)
     runtime_config = RuntimeConfig(
         workspace_name=env("SMA_WORKSPACE_NAME", deployment["workspace_name"]),
         workspace_alias=env("SMA_WORKSPACE_ALIAS", deployment["workspace_alias"]),
@@ -185,6 +188,43 @@ def main() -> int:
     )
 
     def on_result(result):
+        parsed = result.parsed_event
+        node_id = str(parsed.metadata.get("node_id") or "").strip()
+        if node_id and runtime.base is not None:
+            observation_metadata = {
+                key: parsed.metadata[key]
+                for key in (
+                    "sensor",
+                    "node_id",
+                    "location",
+                    "sub_location",
+                    "depth",
+                    "application_id",
+                    "f_port",
+                )
+                if key in parsed.metadata
+            }
+            try:
+                state_store.set_device_observation(
+                    runtime.base.workspace.id,
+                    runtime.base.channel.id,
+                    parsed.external_device_id,
+                    node_id=node_id,
+                    sensor=str(parsed.metadata.get("sensor") or ""),
+                    metadata=observation_metadata,
+                    observed_at=(
+                        float(parsed.metadata["bt"])
+                        if parsed.metadata.get("bt") is not None
+                        else None
+                    ),
+                )
+            except Exception as exc:
+                print(
+                    f"WARN catalog-binding {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
         issue_fields = []
         for issue in result.quality_issues:
             field = issue.source_field or issue.measurement
@@ -195,7 +235,7 @@ def main() -> int:
             quality_detail = " invalid=" + ",".join(issue_fields)
         print(
             "OK "
-            f"parser={result.parser} external={result.parsed_event.external_device_id} "
+            f"parser={result.parser} external={parsed.external_device_id} "
             f"device={result.device.id} cache={result.device_cache_source} "
             f"quality={result.quality_status}{quality_detail} "
             f"records={len(result.senml)} http={result.publish.status}",
@@ -217,6 +257,33 @@ def main() -> int:
         stale_after_seconds=float(env("SMA_DEVICE_STALE_AFTER", "300")),
         offline_after_seconds=float(env("SMA_DEVICE_OFFLINE_AFTER", "1800")),
     )
+
+    def catalog_binding(node_id: str):
+        base = runtime.base
+        if base is None:
+            return None
+        item = state_store.find_latest_device_by_node(
+            base.workspace.id,
+            base.channel.id,
+            node_id,
+        )
+        if item is None:
+            return None
+        decorated = presence_policy.decorate(item)
+        return {
+            "external_id": decorated["external_id"],
+            "atom_device_id": decorated["atom_device_id"],
+            "operational_status": decorated["operational_status"],
+            "last_seen": decorated["last_seen"],
+            "last_seen_age_seconds": decorated["last_seen_age_seconds"],
+            "data_quality": decorated.get("data_quality", "unknown"),
+            "invalid_fields": decorated.get("invalid_fields", []),
+            "quality_evaluated_at": decorated.get("quality_evaluated_at"),
+            "binding_observed_at": decorated.get("binding_observed_at"),
+        }
+
+    catalog_manager.set_binding_resolver(catalog_binding)
+
     service = SmarterAdapterService(
         runtime,
         configs,
