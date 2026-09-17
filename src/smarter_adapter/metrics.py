@@ -45,6 +45,11 @@ def render_prometheus_metrics(status: Mapping[str, Any], *, ready: bool) -> str:
         ("retried", "sma_events_retried_total", "Retry attempts executed."),
         ("recovered", "sma_events_recovered_total", "Retry attempts that recovered successfully."),
         ("dead_lettered", "sma_events_dead_lettered_total", "Events moved to the dead-letter queue."),
+        (
+            "suppressed",
+            "sma_events_suppressed_total",
+            "Events intentionally suppressed by administrative lifecycle policy.",
+        ),
     )
     for key, metric, help_text in counters:
         lines.extend(
