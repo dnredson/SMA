@@ -77,7 +77,7 @@ class SmarterAdapterService:
             self._report_error(exc)
             return
 
-        if is_retryable_failure(exc):
+        if is_retryable_failure(exc) and self.retry_policy.max_attempts > 1:
             attempt = 1
             store.enqueue_retry(
                 raw,
@@ -116,6 +116,12 @@ class SmarterAdapterService:
         except Exception as exc:
             new_attempts = int(item.attempts) + 1
             if (not is_retryable_failure(exc)) or new_attempts >= self.retry_policy.max_attempts:
+                self.reliability_store.reschedule_retry(
+                    item.id,
+                    exc,
+                    attempts=new_attempts,
+                    next_attempt_at=time.time(),
+                )
                 self.reliability_store.move_retry_to_dlq(item.id, exc)
                 with self._lock:
                     self._dead_lettered += 1
