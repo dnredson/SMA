@@ -10,6 +10,7 @@ from .magistrala.publisher import FluxMQPublisher, PublishError, PublishResult
 from .magistrala.rules import PersistenceRuleRef, RulesClient
 from .models import ParsedEvent, RawEvent
 from .pipeline import ParsePipeline
+from .quality import QualityIssue
 from .senml import event_to_senml
 from .storage import DeviceStateStore
 
@@ -32,6 +33,8 @@ class ProcessResult:
     publish: PublishResult
     device_cache_hit: bool
     device_cache_source: str = "remote"
+    quality_status: str = "valid"
+    quality_issues: Tuple[QualityIssue, ...] = ()
 
 
 def _safe_alias(value: str) -> str:
@@ -221,6 +224,8 @@ class SmarterAdapterRuntime:
             publish=published,
             device_cache_hit=cache_source not in ("remote", "reconciled"),
             device_cache_source=cache_source,
+            quality_status=outcome.quality_status,
+            quality_issues=outcome.quality_issues,
         )
 
 
