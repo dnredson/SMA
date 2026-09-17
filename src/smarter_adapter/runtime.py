@@ -10,6 +10,7 @@ from .magistrala.rules import PersistenceRuleRef, RulesClient
 from .models import ParsedEvent, RawEvent
 from .pipeline import ParsePipeline
 from .senml import event_to_senml
+from .storage import DeviceStateStore
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class ProcessResult:
     senml: Tuple[dict, ...]
     publish: PublishResult
     device_cache_hit: bool
+    device_cache_source: str = "remote"
 
 
 def _safe_alias(value: str) -> str:
@@ -54,9 +56,10 @@ class SmarterAdapterRuntime:
     """Join v2 parsing, Atom reconciliation, SenML and FluxMQ publication.
 
     Base resources and the persistence rule are reconciled once at bootstrap.
-    Devices are reconciled lazily on their first observed message and then kept
-    in an in-memory fast-path cache. A persistent state store will replace or
-    back this cache in the reliability milestone without changing this API.
+    Devices are reconciled lazily on their first observed message. The runtime
+    first checks its in-memory fast path, then an optional durable state store,
+    and only then Atom. This preserves external-id -> Atom UUID mappings across
+    process restarts without coupling the pipeline to a specific database.
     """
 
     def __init__(
@@ -67,12 +70,14 @@ class SmarterAdapterRuntime:
         rules: RulesClient,
         publisher: FluxMQPublisher,
         config: RuntimeConfig = RuntimeConfig(),
+        state_store: Optional[DeviceStateStore] = None,
     ) -> None:
         self.pipeline = pipeline
         self.control = control
         self.rules = rules
         self.publisher = publisher
         self.config = config
+        self.state_store = state_store
         self.base: Optional[BaseResources] = None
         self.device_type: Optional[DeviceTypeRef] = None
         self.persistence_rule: Optional[PersistenceRuleRef] = None
@@ -112,7 +117,18 @@ class SmarterAdapterRuntime:
         parsed = outcome.event
 
         device = self._devices.get(parsed.external_device_id)
-        cache_hit = device is not None
+        cache_source = "memory" if device is not None else "remote"
+
+        if device is None and self.state_store is not None:
+            device = self.state_store.get_device(
+                base.workspace.id,
+                base.channel.id,
+                parsed.external_device_id,
+            )
+            if device is not None:
+                cache_source = "persistent"
+                self._devices[parsed.external_device_id] = device
+
         if device is None:
             device = self.control.ensure_device(
                 base.workspace.id,
@@ -124,6 +140,12 @@ class SmarterAdapterRuntime:
                 attributes=_device_attributes(parsed),
             )
             self._devices[parsed.external_device_id] = device
+            if self.state_store is not None:
+                self.state_store.upsert_device(
+                    device,
+                    channel_id=base.channel.id,
+                    seen_at=raw.received_at,
+                )
 
         senml = tuple(event_to_senml(parsed))
         published = self.publisher.publish(
@@ -133,13 +155,22 @@ class SmarterAdapterRuntime:
             senml=list(senml),
         )
 
+        if self.state_store is not None:
+            self.state_store.touch_device(
+                base.workspace.id,
+                base.channel.id,
+                parsed.external_device_id,
+                seen_at=raw.received_at,
+            )
+
         return ProcessResult(
             parser=outcome.parser,
             parsed_event=parsed,
             device=device,
             senml=senml,
             publish=published,
-            device_cache_hit=cache_hit,
+            device_cache_hit=cache_source != "remote",
+            device_cache_source=cache_source,
         )
 
 
