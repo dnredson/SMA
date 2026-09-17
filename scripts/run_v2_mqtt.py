@@ -146,9 +146,13 @@ def main() -> int:
         invalidate_token=atom.tokens.invalidate,
     )
 
+    catalog_inline = env("SMA_IRRIGAP_NODES_JSON")
+    catalog_file = env("SMA_IRRIGAP_NODES_FILE")
+    if not catalog_inline and not catalog_file:
+        catalog_file = deployment["irrigap_nodes_file"]
     irrigap_catalog = load_irrigap_catalog(
-        file_path=env("SMA_IRRIGAP_NODES_FILE", deployment["irrigap_nodes_file"]),
-        inline_json=env("SMA_IRRIGAP_NODES_JSON"),
+        file_path=catalog_file,
+        inline_json=catalog_inline,
     )
     parsers = ParserRegistry(
         [
