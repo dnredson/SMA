@@ -5,7 +5,7 @@ import datetime as dt
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from ..models import Measurement, ParsedEvent, RawEvent
 
@@ -22,6 +22,7 @@ class IrrigapNode:
 
 
 _KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+NodeResolver = Callable[[str], Optional[IrrigapNode]]
 
 
 def _iso_epoch(value: Any) -> Optional[float]:
@@ -102,15 +103,26 @@ class IrrigapChirpStackParser:
 
         S|2509170900|I|3303|M1|1261|T1|22.1|C1|640
 
-    Deployment metadata is injected through ``nodes``. The parser deliberately
-    has no embedded field catalog: unknown nodes still parse and are simply
-    emitted without location/depth metadata.
+    Deployment metadata may be supplied as a static ``nodes`` tuple or through
+    a live ``node_resolver``. Unknown nodes still parse and are simply emitted
+    without location/depth metadata.
     """
 
     name = "chirpstack-irrigap-v2"
 
-    def __init__(self, nodes: Tuple[IrrigapNode, ...] = ()) -> None:
+    def __init__(
+        self,
+        nodes: Tuple[IrrigapNode, ...] = (),
+        *,
+        node_resolver: Optional[NodeResolver] = None,
+    ) -> None:
         self._nodes = {node.id.upper(): node for node in nodes}
+        self._node_resolver = node_resolver
+
+    def _resolve_node(self, node_id: str) -> Optional[IrrigapNode]:
+        if self._node_resolver is not None:
+            return self._node_resolver(node_id)
+        return self._nodes.get(node_id.upper())
 
     def supports(self, event: RawEvent) -> bool:
         if not event.payload.lstrip().startswith(b"{"):
@@ -175,7 +187,7 @@ class IrrigapChirpStackParser:
         except (TypeError, ValueError):
             return None
 
-        node = self._nodes.get(node_id)
+        node = self._resolve_node(node_id)
         timestamp = _iso_epoch(envelope.get("time")) or event.received_at
 
         moisture_invalid = moisture_raw is not None and moisture_raw < 0.0
@@ -273,4 +285,5 @@ class IrrigapChirpStackParser:
 __all__ = [
     "IrrigapChirpStackParser",
     "IrrigapNode",
+    "NodeResolver",
 ]
