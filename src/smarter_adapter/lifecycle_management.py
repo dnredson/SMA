@@ -137,6 +137,25 @@ class _LifecycleHandler(_Handler):
         except Exception as exc:
             self._error(500, str(exc))
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        if not self._authorized():
+            self._error(401, "unauthorized")
+            return
+        path = urlparse(self.path).path.rstrip("/")
+        node_id = self._catalog_node_id(path)
+        catalog = self.catalog
+        public_item = getattr(catalog, "public_item", None) if catalog is not None else None
+        if node_id is not None and callable(public_item):
+            item = public_item(node_id)
+            if item is not None and item.get("lifecycle_state") != "planned":
+                self._error(
+                    409,
+                    "catalog nodes with observation/management history cannot be deleted; "
+                    "decommission the node instead",
+                )
+                return
+        super().do_DELETE()
+
 
 class LifecycleManagementServer(ThreadingHTTPServer):
     allow_reuse_address = True
