@@ -38,6 +38,20 @@ class SQLiteManagementStore(SQLiteStateStore):
             rows = self._conn.execute(query, values).fetchall()
         return [dict(row) for row in rows]
 
+    def find_device(self, workspace_id: str, channel_id: str, external_id: str):
+        """Return one managed-device record for management/read operations."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT workspace_id, channel_id, external_id, atom_device_id, name,
+                       profile_id, profile_version_id, first_seen, last_seen, last_sync
+                FROM managed_devices
+                WHERE workspace_id = ? AND channel_id = ? AND external_id = ?
+                """,
+                (str(workspace_id), str(channel_id), str(external_id)),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def list_retries(self, *, limit: int = 100):
         with self._lock:
             rows = self._conn.execute(
