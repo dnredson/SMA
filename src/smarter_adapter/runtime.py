@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 from .magistrala.control_plane import BaseResources, ControlPlane, DeviceRef, DeviceTypeRef
-from .magistrala.publisher import FluxMQPublisher, PublishResult
+from .magistrala.publisher import FluxMQPublisher, PublishError, PublishResult
 from .magistrala.rules import PersistenceRuleRef, RulesClient
 from .models import ParsedEvent, RawEvent
 from .pipeline import ParsePipeline
@@ -40,8 +40,6 @@ def _safe_alias(value: str) -> str:
 
 
 def _device_attributes(event: ParsedEvent) -> dict:
-    # Device metadata is relatively stable. Do not copy raw payloads or values
-    # into Atom attributes on every message; those belong in the data plane.
     allowed = (
         "sensor",
         "node_id",
@@ -54,14 +52,7 @@ def _device_attributes(event: ParsedEvent) -> dict:
 
 
 class SmarterAdapterRuntime:
-    """Join v2 parsing, Atom reconciliation, SenML and FluxMQ publication.
-
-    Base resources and the persistence rule are reconciled once at bootstrap.
-    Devices are reconciled lazily on their first observed message. The runtime
-    first checks its in-memory fast path, then an optional durable state store,
-    and only then Atom. Control-plane reconciliation is serialized so multiple
-    MQTT inputs cannot race while discovering the same new device.
-    """
+    """Join v2 parsing, Atom reconciliation, SenML and FluxMQ publication."""
 
     def __init__(
         self,
@@ -92,11 +83,7 @@ class SmarterAdapterRuntime:
 
     def bootstrap(self) -> None:
         with self._control_lock:
-            if (
-                self.base is not None
-                and self.device_type is not None
-                and self.persistence_rule is not None
-            ):
+            if self.base is not None and self.device_type is not None and self.persistence_rule is not None:
                 return
             base = self.control.ensure_base(
                 workspace_name=self.config.workspace_name,
@@ -120,50 +107,86 @@ class SmarterAdapterRuntime:
         assert self.device_type is not None
         return self.base, self.device_type
 
+    def _remote_device(
+        self,
+        base: BaseResources,
+        device_type: DeviceTypeRef,
+        parsed: ParsedEvent,
+        raw: RawEvent,
+    ) -> DeviceRef:
+        device = self.control.ensure_device(
+            base.workspace.id,
+            base.channel.id,
+            parsed.external_device_id,
+            device_type=device_type,
+            name=parsed.external_device_id,
+            alias=_safe_alias(parsed.external_device_id),
+            attributes=_device_attributes(parsed),
+        )
+        self._devices[parsed.external_device_id] = device
+        if self.state_store is not None:
+            self.state_store.upsert_device(
+                device,
+                channel_id=base.channel.id,
+                seen_at=raw.received_at,
+            )
+        return device
+
+    def _resolve_device(
+        self,
+        base: BaseResources,
+        device_type: DeviceTypeRef,
+        parsed: ParsedEvent,
+        raw: RawEvent,
+    ) -> tuple[DeviceRef, str]:
+        device = self._devices.get(parsed.external_device_id)
+        if device is not None:
+            return device, "memory"
+
+        if self.state_store is not None:
+            device = self.state_store.get_device(
+                base.workspace.id,
+                base.channel.id,
+                parsed.external_device_id,
+            )
+            if device is not None:
+                self._devices[parsed.external_device_id] = device
+                return device, "persistent"
+
+        return self._remote_device(base, device_type, parsed, raw), "remote"
+
     def process(self, raw: RawEvent) -> ProcessResult:
         outcome = self.pipeline.process(raw)
         parsed = outcome.event
 
         with self._control_lock:
             base, device_type = self._ensure_bootstrapped()
-            device = self._devices.get(parsed.external_device_id)
-            cache_source = "memory" if device is not None else "remote"
-
-            if device is None and self.state_store is not None:
-                device = self.state_store.get_device(
-                    base.workspace.id,
-                    base.channel.id,
-                    parsed.external_device_id,
-                )
-                if device is not None:
-                    cache_source = "persistent"
-                    self._devices[parsed.external_device_id] = device
-
-            if device is None:
-                device = self.control.ensure_device(
-                    base.workspace.id,
-                    base.channel.id,
-                    parsed.external_device_id,
-                    device_type=device_type,
-                    name=parsed.external_device_id,
-                    alias=_safe_alias(parsed.external_device_id),
-                    attributes=_device_attributes(parsed),
-                )
-                self._devices[parsed.external_device_id] = device
-                if self.state_store is not None:
-                    self.state_store.upsert_device(
-                        device,
-                        channel_id=base.channel.id,
-                        seen_at=raw.received_at,
-                    )
+            device, cache_source = self._resolve_device(base, device_type, parsed, raw)
 
         senml = tuple(event_to_senml(parsed))
-        published = self.publisher.publish(
-            workspace_id=base.workspace.id,
-            channel_id=base.channel.id,
-            device_id=device.id,
-            senml=list(senml),
-        )
+        try:
+            published = self.publisher.publish(
+                workspace_id=base.workspace.id,
+                channel_id=base.channel.id,
+                device_id=device.id,
+                senml=list(senml),
+            )
+        except PublishError as exc:
+            # A persistent/local mapping may be stale, or the device->channel
+            # policy may have been removed. Reconcile once before giving the
+            # reliability layer a chance to queue the raw event.
+            if exc.status not in (403, 404):
+                raise
+            with self._control_lock:
+                self._devices.pop(parsed.external_device_id, None)
+                device = self._remote_device(base, device_type, parsed, raw)
+                cache_source = "reconciled"
+            published = self.publisher.publish(
+                workspace_id=base.workspace.id,
+                channel_id=base.channel.id,
+                device_id=device.id,
+                senml=list(senml),
+            )
 
         if self.state_store is not None:
             self.state_store.touch_device(
@@ -179,7 +202,7 @@ class SmarterAdapterRuntime:
             device=device,
             senml=senml,
             publish=published,
-            device_cache_hit=cache_source != "remote",
+            device_cache_hit=cache_source not in ("remote", "reconciled"),
             device_cache_source=cache_source,
         )
 
