@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from smarter_adapter.inputs import MQTTInputConfig
+from smarter_adapter.irrigap_config import load_irrigap_catalog
 from smarter_adapter.legacy_parser import LegacySensorParser
 from smarter_adapter.management import start_management_server
 from smarter_adapter.magistrala import (
@@ -46,6 +47,7 @@ def environment_defaults(name: str) -> dict[str, str]:
             "channel_name": "Telemetry",
             "channel_alias": "telemetry",
             "state_db": str(ROOT / ".state" / "smarter_adapter-irrigap.sqlite3"),
+            "irrigap_nodes_file": str(ROOT / "config" / "irrigap.nodes.json"),
         }
     if normalized in ("test", "dev", "development"):
         return {
@@ -55,6 +57,7 @@ def environment_defaults(name: str) -> dict[str, str]:
             "channel_name": "Telemetry",
             "channel_alias": "telemetry",
             "state_db": str(ROOT / ".state" / "smarter_adapter-test.sqlite3"),
+            "irrigap_nodes_file": "",
         }
     raise RuntimeError(
         "SMA_ENVIRONMENT must be one of: test, dev, irrigap, field, production, prod"
@@ -143,7 +146,16 @@ def main() -> int:
         invalidate_token=atom.tokens.invalidate,
     )
 
-    parsers = ParserRegistry([IrrigapChirpStackParser(), LegacySensorParser()])
+    irrigap_catalog = load_irrigap_catalog(
+        file_path=env("SMA_IRRIGAP_NODES_FILE", deployment["irrigap_nodes_file"]),
+        inline_json=env("SMA_IRRIGAP_NODES_JSON"),
+    )
+    parsers = ParserRegistry(
+        [
+            IrrigapChirpStackParser(irrigap_catalog.nodes),
+            LegacySensorParser(),
+        ]
+    )
     pipeline = ParsePipeline(parsers)
 
     state_path = Path(env("SMA_STATE_DB", deployment["state_db"]))
@@ -220,6 +232,7 @@ def main() -> int:
         print(f"State DB:  {state_path}")
         print(f"Workspace: {runtime_config.workspace_name} ({runtime_config.workspace_alias})")
         print(f"Channel:   {runtime_config.channel_name} ({runtime_config.channel_alias})")
+        print(f"Irrigap:   catalog={irrigap_catalog.source} nodes={len(irrigap_catalog.nodes)}")
         print(f"Atom:      {atom_url}")
         print(f"Publish:   {publish_url}")
         print(f"Rules:     {rules_url}")
