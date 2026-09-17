@@ -243,6 +243,7 @@ def main() -> int:
             "data_quality": decorated.get("data_quality", "unknown"),
             "invalid_fields": decorated.get("invalid_fields", []),
             "quality_evaluated_at": decorated.get("quality_evaluated_at"),
+            "quality_source_received_at": decorated.get("quality_source_received_at"),
             "binding_observed_at": decorated.get("binding_observed_at"),
         }
 
