@@ -6,7 +6,14 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from .magistrala.control_plane import BaseResources, ControlPlane, DeviceRef, DeviceTypeRef
+from .device_profiles import DeviceProfileRegistry
+from .magistrala.control_plane import (
+    GENERIC_DEVICE_TYPE_KEY,
+    BaseResources,
+    ControlPlane,
+    DeviceRef,
+    DeviceTypeRef,
+)
 from .magistrala.publisher import FluxMQPublisher, PublishError, PublishResult
 from .magistrala.rules import PersistenceRuleRef, RulesClient
 from .models import ParsedEvent, RawEvent
@@ -36,6 +43,7 @@ class ProcessResult:
     device_cache_source: str = "remote"
     quality_status: str = "valid"
     quality_issues: Tuple[QualityIssue, ...] = ()
+    profile_key: str = GENERIC_DEVICE_TYPE_KEY
 
 
 def _safe_alias(value: str) -> str:
@@ -79,7 +87,7 @@ def _quality_invalid_fields(issues: Tuple[QualityIssue, ...]) -> tuple[str, ...]
 
 
 class SmarterAdapterRuntime:
-    """Join v2 parsing, Atom reconciliation, SenML and FluxMQ publication."""
+    """Join parsing, typed Atom reconciliation, SenML and publication."""
 
     def __init__(
         self,
@@ -90,6 +98,7 @@ class SmarterAdapterRuntime:
         publisher: FluxMQPublisher,
         config: RuntimeConfig = RuntimeConfig(),
         state_store: Optional[DeviceStateStore] = None,
+        profile_registry: Optional[DeviceProfileRegistry] = None,
     ) -> None:
         self.pipeline = pipeline
         self.control = control
@@ -97,9 +106,12 @@ class SmarterAdapterRuntime:
         self.publisher = publisher
         self.config = config
         self.state_store = state_store
+        self.profile_registry = profile_registry or DeviceProfileRegistry()
         self.base: Optional[BaseResources] = None
+        # Backward-compatible generic fallback used for readiness and unknown families.
         self.device_type: Optional[DeviceTypeRef] = None
         self.persistence_rule: Optional[PersistenceRuleRef] = None
+        self._device_types: Dict[str, DeviceTypeRef] = {}
         self._devices: Dict[str, DeviceRef] = {}
         self._control_lock = threading.RLock()
 
@@ -107,6 +119,16 @@ class SmarterAdapterRuntime:
     def device_cache_size(self) -> int:
         with self._control_lock:
             return len(self._devices)
+
+    @property
+    def profile_cache_size(self) -> int:
+        with self._control_lock:
+            return len(self._device_types)
+
+    @property
+    def profile_keys(self) -> tuple[str, ...]:
+        with self._control_lock:
+            return tuple(sorted(self._device_types))
 
     def clear_device_cache(self) -> int:
         """Drop only the in-memory device fast path.
@@ -135,14 +157,15 @@ class SmarterAdapterRuntime:
                 channel_name=self.config.channel_name,
                 channel_alias=self.config.channel_alias,
             )
-            device_type = self.control.ensure_device_type(base.workspace.id)
+            generic_type = self.control.ensure_device_type(base.workspace.id)
             persistence = self.rules.ensure_senml_persistence(
                 base.workspace.id,
                 base.channel.id,
                 name=self.config.persistence_rule_name,
             )
             self.base = base
-            self.device_type = device_type
+            self.device_type = generic_type
+            self._device_types[GENERIC_DEVICE_TYPE_KEY] = generic_type
             self.persistence_rule = persistence
 
     def _ensure_bootstrapped(self) -> tuple[BaseResources, DeviceTypeRef]:
@@ -151,19 +174,41 @@ class SmarterAdapterRuntime:
         assert self.device_type is not None
         return self.base, self.device_type
 
+    def _device_type_for(
+        self,
+        base: BaseResources,
+        parsed: ParsedEvent,
+        fallback: DeviceTypeRef,
+    ) -> tuple[DeviceTypeRef, str]:
+        spec = self.profile_registry.resolve(parsed)
+        if spec is None:
+            return fallback, GENERIC_DEVICE_TYPE_KEY
+        cached = self._device_types.get(spec.key)
+        if cached is None:
+            cached = self.control.ensure_device_type(
+                base.workspace.id,
+                key=spec.key,
+                name=spec.name,
+                description=spec.description,
+                json_schema=spec.json_schema,
+            )
+            self._device_types[spec.key] = cached
+        return cached, spec.key
+
+    @staticmethod
+    def _profile_matches(device: DeviceRef, device_type: DeviceTypeRef) -> bool:
+        return (
+            device.profile_id == device_type.id
+            and device.profile_version_id == device_type.version_id
+        )
+
     def _record_catalog_observation(
         self,
         base: BaseResources,
         parsed: ParsedEvent,
         raw: RawEvent,
     ) -> None:
-        """Persist successful physical parsing before device reconciliation.
-
-        Stores that do not implement catalog lifecycle tracking are unaffected.
-        This deliberately happens before ``ensure_device`` so the management
-        plane can distinguish a merely planned node from one whose telemetry
-        was actually observed even if downstream management later fails.
-        """
+        """Persist successful physical parsing before device reconciliation."""
         if self.state_store is None:
             return
         setter = getattr(self.state_store, "observe_catalog_node", None)
@@ -188,12 +233,7 @@ class SmarterAdapterRuntime:
         parsed: ParsedEvent,
         raw: RawEvent,
     ) -> None:
-        """Promote an observed physical node to a durable managed binding.
-
-        This is called only after a successful downstream publish. Keeping the
-        transition inside the runtime makes normal delivery and retry recovery
-        use exactly the same lifecycle path and clock.
-        """
+        """Promote an observed physical node to a durable managed binding."""
         if self.state_store is None:
             return
         setter = getattr(self.state_store, "set_device_observation", None)
@@ -227,6 +267,7 @@ class SmarterAdapterRuntime:
             name=parsed.external_device_id,
             alias=_safe_alias(parsed.external_device_id),
             attributes=_device_attributes(parsed),
+            allow_profile_migration=True,
         )
         self._devices[parsed.external_device_id] = device
         if self.state_store is not None:
@@ -246,7 +287,10 @@ class SmarterAdapterRuntime:
     ) -> tuple[DeviceRef, str]:
         device = self._devices.get(parsed.external_device_id)
         if device is not None:
-            return device, "memory"
+            if self._profile_matches(device, device_type):
+                return device, "memory"
+            migrated = self._remote_device(base, device_type, parsed, raw)
+            return migrated, "profile-migrated" if migrated.profile_migrated else "remote"
 
         if self.state_store is not None:
             device = self.state_store.get_device(
@@ -255,10 +299,14 @@ class SmarterAdapterRuntime:
                 parsed.external_device_id,
             )
             if device is not None:
-                self._devices[parsed.external_device_id] = device
-                return device, "persistent"
+                if self._profile_matches(device, device_type):
+                    self._devices[parsed.external_device_id] = device
+                    return device, "persistent"
+                migrated = self._remote_device(base, device_type, parsed, raw)
+                return migrated, "profile-migrated" if migrated.profile_migrated else "remote"
 
-        return self._remote_device(base, device_type, parsed, raw), "remote"
+        device = self._remote_device(base, device_type, parsed, raw)
+        return device, "profile-migrated" if device.profile_migrated else "remote"
 
     def _record_quality(
         self,
@@ -289,8 +337,9 @@ class SmarterAdapterRuntime:
         parsed = outcome.event
 
         with self._control_lock:
-            base, device_type = self._ensure_bootstrapped()
+            base, fallback_type = self._ensure_bootstrapped()
             self._record_catalog_observation(base, parsed, raw)
+            device_type, profile_key = self._device_type_for(base, parsed, fallback_type)
             device, cache_source = self._resolve_device(base, device_type, parsed, raw)
 
         senml = tuple(event_to_senml(parsed))
@@ -340,10 +389,15 @@ class SmarterAdapterRuntime:
             device=device,
             senml=senml,
             publish=published,
-            device_cache_hit=cache_source not in ("remote", "reconciled"),
+            device_cache_hit=cache_source not in (
+                "remote",
+                "reconciled",
+                "profile-migrated",
+            ),
             device_cache_source=cache_source,
             quality_status=outcome.quality_status,
             quality_issues=outcome.quality_issues,
+            profile_key=profile_key,
         )
 
 
