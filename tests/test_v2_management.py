@@ -16,6 +16,7 @@ from smarter_adapter.magistrala.reader import MessagesPage
 from smarter_adapter.management import start_management_server
 from smarter_adapter.models import RawEvent
 from smarter_adapter.plugins import ParserNotFound
+from smarter_adapter.presence import DevicePresencePolicy
 from smarter_adapter.service import ServiceStats
 from smarter_adapter.storage import SQLiteManagementStore
 
@@ -99,6 +100,10 @@ class ManagementAPITests(unittest.TestCase):
             runtime=self.runtime,
             store=self.store,
             reader=self.reader,
+            presence_policy=DevicePresencePolicy(
+                stale_after_seconds=60,
+                offline_after_seconds=120,
+            ),
             api_token="secret",
         )
         host, port = self.server.server_address[:2]
@@ -132,6 +137,17 @@ class ManagementAPITests(unittest.TestCase):
         self.assertEqual(body["runtime"]["workspace_id"], "ws-1")
         self.assertEqual(body["service"]["received"], 3)
         self.assertTrue(body["runtime"]["reader_configured"])
+        self.assertEqual(
+            body["devices"],
+            {
+                "total": 0,
+                "online": 0,
+                "stale": 0,
+                "offline": 0,
+                "stale_after_seconds": 60,
+                "offline_after_seconds": 120,
+            },
+        )
 
     def test_dlq_can_be_requeued_through_http(self):
         raw = RawEvent(
@@ -172,7 +188,7 @@ class ManagementAPITests(unittest.TestCase):
         self.assertTrue(self.runtime.bootstrap_force)
         self.assertEqual(self.runtime.clear_calls, 1)
 
-    def test_managed_device_telemetry_is_exposed_through_reader(self):
+    def test_managed_device_telemetry_and_presence_are_exposed(self):
         device = DeviceRef(
             id="atom-device-1",
             workspace_id="ws-1",
@@ -181,7 +197,18 @@ class ManagementAPITests(unittest.TestCase):
             profile_id="profile-1",
             profile_version_id="version-1",
         )
-        self.store.upsert_device(device, channel_id="ch-1", seen_at=100.0)
+        seen_at = time.time() - 90.0
+        self.store.upsert_device(device, channel_id="ch-1", seen_at=seen_at)
+
+        status, devices = _http(
+            "GET",
+            self.base + "/api/v2/devices",
+            token="secret",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(devices["total"], 1)
+        self.assertEqual(devices["items"][0]["operational_status"], "stale")
+        self.assertGreaterEqual(devices["items"][0]["last_seen_age_seconds"], 90.0)
 
         status, body = _http(
             "GET",
@@ -192,6 +219,7 @@ class ManagementAPITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["external_id"], "teros12-sector1.1")
         self.assertEqual(body["atom_device_id"], "atom-device-1")
+        self.assertEqual(body["operational_status"], "stale")
         self.assertEqual(body["total"], 1)
         self.assertEqual(body["messages"][0]["value"], 25.3)
         self.assertEqual(self.reader.calls[0][0:3], ("ws-1", "ch-1", "teros12-sector1.1"))
@@ -200,6 +228,11 @@ class ManagementAPITests(unittest.TestCase):
             self.reader.calls[0][3]["name"],
             "teros12-sector1.1:soil.temperature",
         )
+
+        status, summary = _http("GET", self.base + "/api/v2/status", token="secret")
+        self.assertEqual(status, 200)
+        self.assertEqual(summary["devices"]["total"], 1)
+        self.assertEqual(summary["devices"]["stale"], 1)
 
         with self.assertRaises(error.HTTPError) as ctx:
             _http(
