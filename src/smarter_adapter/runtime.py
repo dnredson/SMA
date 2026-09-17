@@ -182,6 +182,36 @@ class SmarterAdapterRuntime:
             observed_at=raw.received_at,
         )
 
+    def _record_managed_observation(
+        self,
+        base: BaseResources,
+        parsed: ParsedEvent,
+        raw: RawEvent,
+    ) -> None:
+        """Promote an observed physical node to a durable managed binding.
+
+        This is called only after a successful downstream publish. Keeping the
+        transition inside the runtime makes normal delivery and retry recovery
+        use exactly the same lifecycle path and clock.
+        """
+        if self.state_store is None:
+            return
+        setter = getattr(self.state_store, "set_device_observation", None)
+        if not callable(setter):
+            return
+        node_id = str(parsed.metadata.get("node_id") or "").strip()
+        if not node_id:
+            return
+        setter(
+            base.workspace.id,
+            base.channel.id,
+            parsed.external_device_id,
+            node_id=node_id,
+            sensor=str(parsed.metadata.get("sensor") or ""),
+            metadata=_observation_metadata(parsed),
+            observed_at=raw.received_at,
+        )
+
     def _remote_device(
         self,
         base: BaseResources,
@@ -295,6 +325,7 @@ class SmarterAdapterRuntime:
                 parsed.external_device_id,
                 seen_at=raw.received_at,
             )
+            self._record_managed_observation(base, parsed, raw)
             self._record_quality(
                 base,
                 parsed,
