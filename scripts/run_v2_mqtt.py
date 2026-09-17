@@ -18,6 +18,7 @@ from smarter_adapter.magistrala.publisher import FluxMQPublisher
 from smarter_adapter.parsers import IrrigapChirpStackParser
 from smarter_adapter.pipeline import ParsePipeline
 from smarter_adapter.plugins import ParserRegistry
+from smarter_adapter.reliability import RetryPolicy
 from smarter_adapter.runtime import RuntimeConfig, SmarterAdapterRuntime
 from smarter_adapter.service import SmarterAdapterService
 from smarter_adapter.storage import SQLiteStateStore
@@ -85,10 +86,7 @@ def main() -> int:
     username = env("ATOM_USERNAME", "admin")
     password = env("ATOM_PASSWORD")
     if not token and not password:
-        print(
-            "ERROR: set ATOM_SERVICE_TOKEN/ATOM_ADMIN_TOKEN or ATOM_PASSWORD",
-            file=sys.stderr,
-        )
+        print("ERROR: set ATOM_SERVICE_TOKEN/ATOM_ADMIN_TOKEN or ATOM_PASSWORD", file=sys.stderr)
         return 2
 
     atom = AtomClient(
@@ -101,23 +99,10 @@ def main() -> int:
         )
     )
     control = ControlPlane(atom)
-    rules = RulesClient(
-        rules_url,
-        atom.token,
-        invalidate_token=atom.tokens.invalidate,
-    )
-    publisher = FluxMQPublisher(
-        publish_url,
-        atom.token,
-        invalidate_token=atom.tokens.invalidate,
-    )
+    rules = RulesClient(rules_url, atom.token, invalidate_token=atom.tokens.invalidate)
+    publisher = FluxMQPublisher(publish_url, atom.token, invalidate_token=atom.tokens.invalidate)
 
-    parsers = ParserRegistry(
-        [
-            IrrigapChirpStackParser(),
-            LegacySensorParser(),
-        ]
-    )
+    parsers = ParserRegistry([IrrigapChirpStackParser(), LegacySensorParser()])
     pipeline = ParsePipeline(parsers)
 
     state_path = Path(env("SMA_STATE_DB", str(ROOT / ".state" / "smarter_adapter.sqlite3")))
@@ -132,10 +117,7 @@ def main() -> int:
             workspace_alias=env("SMA_WORKSPACE_ALIAS", "smarter-adapter-test"),
             channel_name=env("SMA_CHANNEL_NAME", "Telemetry"),
             channel_alias=env("SMA_CHANNEL_ALIAS", "telemetry"),
-            persistence_rule_name=env(
-                "SMA_PERSISTENCE_RULE_NAME",
-                "smarter-adapter-save-senml",
-            ),
+            persistence_rule_name=env("SMA_PERSISTENCE_RULE_NAME", "smarter-adapter-save-senml"),
         ),
         state_store=state_store,
     )
@@ -143,12 +125,9 @@ def main() -> int:
     def on_result(result):
         print(
             "OK "
-            f"parser={result.parser} "
-            f"external={result.parsed_event.external_device_id} "
-            f"device={result.device.id} "
-            f"cache={result.device_cache_source} "
-            f"records={len(result.senml)} "
-            f"http={result.publish.status}",
+            f"parser={result.parser} external={result.parsed_event.external_device_id} "
+            f"device={result.device.id} cache={result.device_cache_source} "
+            f"records={len(result.senml)} http={result.publish.status}",
             flush=True,
         )
 
@@ -156,31 +135,39 @@ def main() -> int:
         print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
     configs = mqtt_inputs()
+    retry_policy = RetryPolicy(
+        max_attempts=int(env("SMA_RETRY_MAX_ATTEMPTS", "5")),
+        base_delay_seconds=float(env("SMA_RETRY_BASE_DELAY", "1")),
+        max_delay_seconds=float(env("SMA_RETRY_MAX_DELAY", "60")),
+        poll_interval_seconds=float(env("SMA_RETRY_POLL_INTERVAL", "0.5")),
+        batch_size=int(env("SMA_RETRY_BATCH_SIZE", "50")),
+    )
     service = SmarterAdapterService(
         runtime,
         configs,
         on_result=on_result,
         on_error=on_error,
+        reliability_store=state_store,
+        retry_policy=retry_policy,
     )
 
     stop = threading.Event()
-
-    def request_stop(signum, frame):
-        stop.set()
-
-    signal.signal(signal.SIGINT, request_stop)
-    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, lambda signum, frame: stop.set())
+    signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
 
     try:
         print(f"State DB:  {state_path}")
         print(f"Atom:      {atom_url}")
         print(f"Publish:   {publish_url}")
         print(f"Rules:     {rules_url}")
+        print(
+            "Retry:     "
+            f"max={retry_policy.max_attempts} base={retry_policy.base_delay_seconds}s "
+            f"max_delay={retry_policy.max_delay_seconds}s"
+        )
+        print(f"Pending:   retry={state_store.count_retries()} dlq={state_store.count_dlq()}")
         for index, config in enumerate(configs, start=1):
-            print(
-                f"Input {index}: {config.host}:{config.port} "
-                f"topic={config.topic} source={config.source}"
-            )
+            print(f"Input {index}: {config.host}:{config.port} topic={config.topic} source={config.source}")
         print("Bootstrapping and starting inputs...")
         service.start()
         assert runtime.base is not None
@@ -193,9 +180,14 @@ def main() -> int:
     finally:
         service.stop()
         stats = service.stats
+        pending_retry = state_store.count_retries()
+        pending_dlq = state_store.count_dlq()
         state_store.close()
         print(
-            f"STOPPED received={stats.received} processed={stats.processed} failed={stats.failed}"
+            "STOPPED "
+            f"received={stats.received} processed={stats.processed} failed={stats.failed} "
+            f"queued={stats.queued} retried={stats.retried} recovered={stats.recovered} "
+            f"dead_lettered={stats.dead_lettered} pending_retry={pending_retry} dlq={pending_dlq}"
         )
     return 0
 
