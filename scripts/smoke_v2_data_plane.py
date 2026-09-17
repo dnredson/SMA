@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from smarter_adapter.magistrala import AtomClient, AtomConfig, ControlPlane
 from smarter_adapter.magistrala.publisher import FluxMQPublisher
+from smarter_adapter.magistrala.rules import RulesClient
 from smarter_adapter.models import Measurement, ParsedEvent
 from smarter_adapter.senml import event_to_senml
 
@@ -67,6 +68,7 @@ def fetch_messages(
 def main() -> int:
     atom_url = env("ATOM_URL", "http://127.0.0.1")
     publish_url = env("MAGISTRALA_PUBLISH_URL", atom_url)
+    rules_url = env("MAGISTRALA_RULES_URL", publish_url)
     reader_url = env("MAGISTRALA_READER_URL", "http://127.0.0.1:9011")
     token = env("ATOM_SERVICE_TOKEN") or env("ATOM_ADMIN_TOKEN") or env("ATOM_TOKEN")
     username = env("ATOM_USERNAME", "admin")
@@ -104,6 +106,20 @@ def main() -> int:
         },
     )
 
+    rules = RulesClient(
+        rules_url,
+        client.token,
+        invalidate_token=client.tokens.invalidate,
+    )
+    persistence = rules.ensure_senml_persistence(
+        managed.base.workspace.id,
+        managed.base.channel.id,
+    )
+    if persistence.created or persistence.enabled:
+        # Give the running Rules Engine a short interval to activate a freshly
+        # reconciled rule before the smoke message is published.
+        time.sleep(0.5)
+
     now = time.time()
     marker = f"sma-v2-{int(now * 1000)}"
     event = ParsedEvent(
@@ -125,11 +141,17 @@ def main() -> int:
 
     print(f"Atom:      {atom_url}")
     print(f"Publish:   {publish_url}")
+    print(f"Rules:     {rules_url}")
     print(f"Reader:    {reader_url}")
     print(f"Workspace: {managed.base.workspace.id}")
     print(f"Channel:   {managed.base.channel.id}")
     print(f"Device:    {managed.device.id}")
     print(f"External:  {managed.device.external_id}")
+    print(
+        "Persistence rule: "
+        f"{persistence.id} status={persistence.status} "
+        f"created={persistence.created} enabled={persistence.enabled}"
+    )
     print(f"Marker:    {marker}")
     print("SenML:")
     print(json.dumps(senml, indent=2, ensure_ascii=False))
@@ -146,7 +168,7 @@ def main() -> int:
         managed.device.external_id + ":smoke.moisture": 42.125,
         managed.device.external_id + ":smoke.temperature": 22.1,
     }
-    deadline = time.time() + float(env("SMA_SMOKE_READ_WAIT", "20"))
+    deadline = time.time() + float(env("SMA_SMOKE_READ_WAIT", "30"))
     last_payload = None
 
     while time.time() < deadline:
