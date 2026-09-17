@@ -3,15 +3,12 @@ from __future__ import annotations
 from typing import Optional, Protocol, runtime_checkable
 
 from ..magistrala.control_plane import DeviceRef
+from ..reliability import DeliveryQueueStore
 
 
 @runtime_checkable
 class DeviceStateStore(Protocol):
-    """Persistent mapping between external devices and Atom devices.
-
-    Stores are scoped by workspace and channel so the same external identifier
-    can safely exist in independent Smarter Adapter deployments.
-    """
+    """Persistent mapping between external devices and Atom devices."""
 
     def get_device(
         self,
@@ -40,4 +37,4 @@ class DeviceStateStore(Protocol):
 
 from .sqlite import SQLiteStateStore
 
-__all__ = ["DeviceStateStore", "SQLiteStateStore"]
+__all__ = ["DeliveryQueueStore", "DeviceStateStore", "SQLiteStateStore"]
