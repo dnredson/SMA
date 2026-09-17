@@ -10,6 +10,7 @@ from .control_plane import (
     ManagedDeviceResources,
     WorkspaceRef,
 )
+from .rules import PersistenceRuleRef, RulesClient, RulesError
 
 __all__ = [
     "AtomClient",
@@ -21,6 +22,9 @@ __all__ = [
     "DeviceRef",
     "DeviceTypeRef",
     "ManagedDeviceResources",
+    "PersistenceRuleRef",
+    "RulesClient",
+    "RulesError",
     "TokenManager",
     "WorkspaceRef",
 ]
