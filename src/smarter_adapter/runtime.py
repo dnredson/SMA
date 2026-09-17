@@ -55,6 +55,20 @@ def _device_attributes(event: ParsedEvent) -> dict:
     return {key: event.metadata[key] for key in allowed if key in event.metadata}
 
 
+def _observation_metadata(event: ParsedEvent) -> dict:
+    allowed = (
+        "sensor",
+        "node_id",
+        "location",
+        "sub_location",
+        "depth",
+        "application_id",
+        "f_port",
+        "bt",
+    )
+    return {key: event.metadata[key] for key in allowed if key in event.metadata}
+
+
 def _quality_invalid_fields(issues: Tuple[QualityIssue, ...]) -> tuple[str, ...]:
     fields = []
     for issue in issues:
@@ -137,6 +151,37 @@ class SmarterAdapterRuntime:
         assert self.device_type is not None
         return self.base, self.device_type
 
+    def _record_catalog_observation(
+        self,
+        base: BaseResources,
+        parsed: ParsedEvent,
+        raw: RawEvent,
+    ) -> None:
+        """Persist successful physical parsing before device reconciliation.
+
+        Stores that do not implement catalog lifecycle tracking are unaffected.
+        This deliberately happens before ``ensure_device`` so the management
+        plane can distinguish a merely planned node from one whose telemetry
+        was actually observed even if downstream management later fails.
+        """
+        if self.state_store is None:
+            return
+        setter = getattr(self.state_store, "observe_catalog_node", None)
+        if not callable(setter):
+            return
+        node_id = str(parsed.metadata.get("node_id") or "").strip()
+        if not node_id:
+            return
+        setter(
+            base.workspace.id,
+            base.channel.id,
+            parsed.external_device_id,
+            node_id=node_id,
+            sensor=str(parsed.metadata.get("sensor") or ""),
+            metadata=_observation_metadata(parsed),
+            observed_at=raw.received_at,
+        )
+
     def _remote_device(
         self,
         base: BaseResources,
@@ -215,6 +260,7 @@ class SmarterAdapterRuntime:
 
         with self._control_lock:
             base, device_type = self._ensure_bootstrapped()
+            self._record_catalog_observation(base, parsed, raw)
             device, cache_source = self._resolve_device(base, device_type, parsed, raw)
 
         senml = tuple(event_to_senml(parsed))
