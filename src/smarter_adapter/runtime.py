@@ -93,9 +93,14 @@ class SmarterAdapterRuntime:
             self._devices.clear()
             return count
 
-    def bootstrap(self) -> None:
+    def bootstrap(self, *, force: bool = False) -> None:
         with self._control_lock:
-            if self.base is not None and self.device_type is not None and self.persistence_rule is not None:
+            if (
+                not force
+                and self.base is not None
+                and self.device_type is not None
+                and self.persistence_rule is not None
+            ):
                 return
             base = self.control.ensure_base(
                 workspace_name=self.config.workspace_name,
