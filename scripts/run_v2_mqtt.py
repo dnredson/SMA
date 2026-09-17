@@ -17,9 +17,13 @@ from smarter_adapter.device_lifecycle import (
     LifecycleIrrigapCatalogManager,
     LifecycleSmarterAdapterRuntime,
 )
+from smarter_adapter.historical_intelligence import (
+    AsyncIntelligenceSideChannel,
+    HistoricalLLMContextBuilder,
+    TimescaleHistoryProvider,
+)
 from smarter_adapter.inputs import MQTTInputConfig
 from smarter_adapter.intelligence import (
-    LLMContextBuilder,
     MqttJsonPublisher,
     ThresholdPolicy,
     alerts_for_result,
@@ -151,6 +155,14 @@ def main() -> int:
         atom.token,
         invalidate_token=atom.tokens.invalidate,
     )
+    # Intelligence gets a shorter Reader timeout because it is optional context
+    # and must not accumulate indefinitely while Timescale is unavailable.
+    history_reader = TimescaleReaderClient(
+        reader_url,
+        atom.token,
+        invalidate_token=atom.tokens.invalidate,
+        timeout=float(env("SMA_LLM_HISTORY_TIMEOUT", "2")),
+    )
 
     catalog_inline = env("SMA_IRRIGAP_NODES_JSON")
     catalog_file = env("SMA_IRRIGAP_NODES_FILE")
@@ -191,13 +203,12 @@ def main() -> int:
     )
 
     # Intelligence side channels are deliberately outside the primary delivery
-    # path: an alert/LLM broker outage must never trigger telemetry retries.
+    # path: an alert/LLM broker or Reader outage must never trigger telemetry retries.
     try:
         threshold_policy = ThresholdPolicy.from_json(env("SMA_QUALITY_THRESHOLDS_JSON"))
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"ERROR: invalid SMA_QUALITY_THRESHOLDS_JSON: {exc}", file=sys.stderr)
         return 2
-    llm_context_builder = LLMContextBuilder()
 
     alerts_address = env("SMA_ALERTS_MQTT_ADDRESS", env("ALERTS_MQTT_ADDRESS"))
     alert_publisher = MqttJsonPublisher(
@@ -217,6 +228,32 @@ def main() -> int:
         password=env("SMA_LLM_CONTEXT_MQTT_PASSWORD"),
         client_id=env("SMA_LLM_CONTEXT_CLIENT_ID", "smarter-adapter-llm-context-v2"),
     )
+    history_provider = TimescaleHistoryProvider(
+        history_reader,
+        limit=int(env("SMA_LLM_HISTORY_LIMIT", "120")),
+        per_series_limit=int(env("SMA_LLM_HISTORY_SERIES_SAMPLES", "12")),
+        max_series=int(env("SMA_LLM_HISTORY_MAX_SERIES", "16")),
+    )
+    historical_context_builder = HistoricalLLMContextBuilder()
+
+    def intelligence_scope() -> tuple[str, str]:
+        base = runtime.base
+        if base is None:
+            raise RuntimeError("runtime is not bootstrapped")
+        return base.workspace.id, base.channel.id
+
+    def intelligence_warning(message: str) -> None:
+        print(f"WARN {message}", file=sys.stderr, flush=True)
+
+    intelligence_worker = AsyncIntelligenceSideChannel(
+        context_builder=historical_context_builder,
+        history_provider=history_provider,
+        alert_publisher=alert_publisher,
+        context_publisher=context_publisher,
+        scope_provider=intelligence_scope,
+        max_queue=int(env("SMA_INTELLIGENCE_QUEUE_MAX", "128")),
+        on_warning=intelligence_warning,
+    )
 
     def on_result(result):
         parsed = result.parsed_event
@@ -230,29 +267,15 @@ def main() -> int:
             quality_detail = " invalid=" + ",".join(issue_fields)
 
         adapter_alerts = alerts_for_result(result, threshold_policy)
-        llm_context = llm_context_builder.build(result, alerts=adapter_alerts)
-
-        if alert_publisher.enabled:
-            for alert in adapter_alerts:
-                ok, detail = alert_publisher.publish(alert)
-                if not ok:
-                    print(
-                        f"WARN alert-mqtt external={parsed.external_device_id} {detail}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-
+        queued, intelligence_state = intelligence_worker.submit(result, adapter_alerts)
         if context_publisher.enabled:
-            ok, detail = context_publisher.publish(
-                llm_context,
-                suffix=parsed.external_device_id,
+            context_state = intelligence_state
+        else:
+            context_state = "builder-only"
+        if intelligence_worker.enabled and not queued and intelligence_state != "disabled":
+            intelligence_warning(
+                f"side-channel external={parsed.external_device_id} state={intelligence_state}"
             )
-            if not ok:
-                print(
-                    f"WARN llm-context-mqtt external={parsed.external_device_id} {detail}",
-                    file=sys.stderr,
-                    flush=True,
-                )
 
         print(
             "OK "
@@ -260,7 +283,7 @@ def main() -> int:
             f"device={result.device.id} cache={result.device_cache_source} "
             f"profile={result.profile_key} "
             f"quality={result.quality_status}{quality_detail} "
-            f"alerts={len(adapter_alerts)} context=ready "
+            f"alerts={len(adapter_alerts)} context={context_state} "
             f"records={len(result.senml)} http={result.publish.status}",
             flush=True,
         )
@@ -389,6 +412,12 @@ def main() -> int:
             f"mqtt={'enabled' if context_publisher.enabled else 'disabled'} "
             f"topic={context_publisher.topic_base}/<external_id>"
         )
+        print(
+            "LLM hist:  timescale=enabled "
+            f"rows={history_provider.limit} series_samples={history_provider.per_series_limit} "
+            f"max_series={history_provider.max_series} "
+            f"async_queue={intelligence_worker._queue.maxsize}"
+        )
         print(f"Atom:      {atom_url}")
         print(f"Publish:   {publish_url}")
         print(f"Rules:     {rules_url}")
@@ -408,6 +437,7 @@ def main() -> int:
         for index, config in enumerate(configs, start=1):
             print(f"Input {index}: {config.host}:{config.port} topic={config.topic} source={config.source}")
         print("Bootstrapping and starting inputs...")
+        intelligence_worker.start()
         service.start()
         management = start_lifecycle_management_server(
             host=api_host,
@@ -433,9 +463,11 @@ def main() -> int:
             management.shutdown()
             management.server_close()
         service.stop()
+        intelligence_worker.close()
         alert_publisher.close()
         context_publisher.close()
         stats = service.stats
+        intelligence_stats = intelligence_worker.stats
         pending_retry = state_store.count_retries()
         pending_dlq = state_store.count_dlq()
         state_store.close()
@@ -444,6 +476,10 @@ def main() -> int:
             f"received={stats.received} processed={stats.processed} failed={stats.failed} "
             f"queued={stats.queued} retried={stats.retried} recovered={stats.recovered} "
             f"dead_lettered={stats.dead_lettered} suppressed={stats.suppressed} "
+            f"intelligence_queued={intelligence_stats.queued} "
+            f"intelligence_processed={intelligence_stats.processed} "
+            f"intelligence_dropped={intelligence_stats.dropped} "
+            f"intelligence_failures={intelligence_stats.failures} "
             f"pending_retry={pending_retry} dlq={pending_dlq}"
         )
     return 0
