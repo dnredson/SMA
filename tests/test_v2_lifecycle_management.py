@@ -101,6 +101,11 @@ class LifecycleManagementAPITests(unittest.TestCase):
             load_irrigap_catalog(file_path=str(path)),
             file_path=str(path),
         )
+        self.catalog.set_observation_resolver(
+            lambda node_id: self.store.find_latest_catalog_observation_by_node(
+                "ws-1", "ch-1", node_id
+            )
+        )
         self.catalog.set_lifecycle_resolver(
             lambda node_id: self.store.get_node_lifecycle("ws-1", "ch-1", node_id)
         )
@@ -167,6 +172,24 @@ class LifecycleManagementAPITests(unittest.TestCase):
         self.assertEqual(body["lifecycle_state"], "planned")
         self.assertEqual(body["administrative_state"], "active")
         self.assertFalse(body["decommissioned"])
+
+    def test_observed_catalog_node_cannot_be_deleted_destructively(self):
+        self.store.observe_catalog_node(
+            "ws-1",
+            "ch-1",
+            "teros12-sector1.3",
+            node_id="2313",
+            sensor="teros12",
+            observed_at=100.0,
+        )
+        with self.assertRaises(error.HTTPError) as ctx:
+            _http(
+                "DELETE",
+                self.base + "/api/v2/catalog/devices/2313",
+                token="secret",
+            )
+        self.assertEqual(ctx.exception.code, 409)
+        self.assertIsNotNone(self.catalog.get_node("2313"))
 
 
 if __name__ == "__main__":
