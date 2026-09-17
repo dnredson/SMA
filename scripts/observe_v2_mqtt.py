@@ -35,12 +35,13 @@ def main() -> int:
     max_parsed = int(env("SMA_OBSERVE_MAX", "5"))
     timeout = float(env("SMA_OBSERVE_TIMEOUT", "180"))
 
+    catalog_inline = env("SMA_IRRIGAP_NODES_JSON")
+    catalog_file = env("SMA_IRRIGAP_NODES_FILE")
+    if not catalog_inline and not catalog_file:
+        catalog_file = str(ROOT / "config" / "irrigap.nodes.json")
     catalog = load_irrigap_catalog(
-        file_path=env(
-            "SMA_IRRIGAP_NODES_FILE",
-            str(ROOT / "config" / "irrigap.nodes.json"),
-        ),
-        inline_json=env("SMA_IRRIGAP_NODES_JSON"),
+        file_path=catalog_file,
+        inline_json=catalog_inline,
     )
     pipeline = ParsePipeline(
         ParserRegistry([
