@@ -115,6 +115,24 @@ class LifecycleAtomClient(AtomClient):
             offset += len(items)
         return matches
 
+    def publish_policy_ids(
+        self,
+        tenant_id: str,
+        device_id: str,
+        channel_id: str,
+    ) -> List[str]:
+        """Return direct publish-policy IDs for one device/channel pair."""
+        return self._publish_policy_ids(tenant_id, device_id, channel_id)
+
+    def has_publish_policy(
+        self,
+        tenant_id: str,
+        device_id: str,
+        channel_id: str,
+    ) -> bool:
+        """Audit whether a direct allow/publish grant currently exists."""
+        return bool(self._publish_policy_ids(tenant_id, device_id, channel_id))
+
     def revoke_publish_policy(
         self,
         tenant_id: str,
