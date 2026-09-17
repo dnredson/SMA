@@ -145,8 +145,8 @@ class SQLiteStateStore:
                     name = excluded.name,
                     profile_id = excluded.profile_id,
                     profile_version_id = excluded.profile_version_id,
-                    last_seen = excluded.last_seen,
-                    last_sync = excluded.last_sync
+                    last_seen = MAX(managed_devices.last_seen, excluded.last_seen),
+                    last_sync = MAX(managed_devices.last_sync, excluded.last_sync)
                 """,
                 (
                     device.workspace_id, channel_id, device.external_id, device.id,
@@ -160,7 +160,7 @@ class SQLiteStateStore:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                UPDATE managed_devices SET last_seen = ?
+                UPDATE managed_devices SET last_seen = MAX(last_seen, ?)
                 WHERE workspace_id = ? AND channel_id = ? AND external_id = ?
                 """,
                 (now, workspace_id, channel_id, external_id),
