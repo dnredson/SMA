@@ -28,10 +28,12 @@ class _Runtime:
         self.persistence_rule = SimpleNamespace(id="rule-1")
         self.device_cache_size = 2
         self.bootstrap_calls = 0
+        self.bootstrap_force = None
         self.clear_calls = 0
 
-    def bootstrap(self):
+    def bootstrap(self, *, force=False):
         self.bootstrap_calls += 1
+        self.bootstrap_force = force
 
     def clear_device_cache(self):
         self.clear_calls += 1
@@ -131,11 +133,13 @@ class ManagementAPITests(unittest.TestCase):
         self.assertEqual(body["total"], 1)
         self.assertEqual(body["items"][0]["attempts"], 0)
 
-    def test_reconcile_clears_only_runtime_fast_path(self):
+    def test_reconcile_forces_control_plane_and_clears_fast_path(self):
         status, body = _http("POST", self.base + "/api/v2/reconcile", token="secret")
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "reconciled")
+        self.assertEqual(body["cleared_device_cache"], 2)
         self.assertEqual(self.runtime.bootstrap_calls, 1)
+        self.assertTrue(self.runtime.bootstrap_force)
         self.assertEqual(self.runtime.clear_calls, 1)
 
 
