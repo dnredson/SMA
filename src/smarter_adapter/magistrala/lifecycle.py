@@ -6,12 +6,39 @@ from .atom import AtomClient, AtomError
 
 
 class LifecycleAtomClient(AtomClient):
-    """Atom client with explicit publish-policy revocation for device lifecycle.
+    """Atom client with lifecycle and typed-profile operations used by SMA v2."""
 
-    Magistrala's current Atom API exposes deletion of direct policies. We only
-    remove direct allow-policies that grant the target device the ``publish``
-    action on the target channel; unrelated permissions are left untouched.
-    """
+    def update_device_profile(
+        self,
+        device_id: str,
+        *,
+        profile_id: str,
+        profile_version_id: str,
+    ) -> Dict[str, Any]:
+        """Rebind a device to another Atom profile/version without changing ID.
+
+        Magistrala's current Atom ``updateEntity`` mutation accepts these fields
+        as a partial update, so omitted name, external ID, attributes and group
+        memberships remain unchanged.
+        """
+        mutation = f"""
+        mutation UpdateDeviceProfile($id: ID!, $input: UpdateEntityInput!) {{
+          updateEntity(id: $id, input: $input) {{ {self.entity_fields} }}
+        }}
+        """
+        updated = self._graphql(
+            mutation,
+            {
+                "id": str(device_id),
+                "input": {
+                    "profileId": str(profile_id),
+                    "profileVersionId": str(profile_version_id),
+                },
+            },
+        ).get("updateEntity") or {}
+        if not updated.get("id"):
+            raise AtomError("Atom did not return the device after profile update")
+        return dict(updated)
 
     def _publish_policy_ids(
         self,
