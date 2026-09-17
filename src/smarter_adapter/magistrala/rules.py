@@ -114,10 +114,44 @@ class RulesClient:
             + parse.urlencode(query)
         )
         _, body = self._request("GET", path)
-        # Current Rules API serializes an empty page as ``rules: null`` rather
-        # than ``rules: []``. Normalize that boundary here so callers never
-        # need to special-case it.
         return list(body.get("rules") or [])
+
+    def get_rule(self, workspace_id: str, rule_id: str) -> Dict[str, Any]:
+        _, body = self._request(
+            "GET",
+            "/"
+            + parse.quote(workspace_id, safe="")
+            + "/rules/"
+            + parse.quote(rule_id, safe=""),
+        )
+        return body
+
+    def delete_rule(self, workspace_id: str, rule_id: str) -> None:
+        self._request(
+            "DELETE",
+            "/"
+            + parse.quote(workspace_id, safe="")
+            + "/rules/"
+            + parse.quote(rule_id, safe=""),
+        )
+
+    @staticmethod
+    def is_managed_persistence_rule(rule: Dict[str, Any]) -> bool:
+        metadata = rule.get("metadata") or {}
+        tags = set(str(value) for value in (rule.get("tags") or []))
+        outputs = rule.get("outputs") or []
+        has_save = any(
+            isinstance(item, dict) and str(item.get("type") or "") == "save_senml"
+            for item in outputs
+        )
+        return (
+            isinstance(metadata, dict)
+            and metadata.get("managed_by") == "smarter-adapter"
+            and metadata.get("purpose") == "senml-persistence"
+            and has_save
+            and "smarter-adapter" in tags
+            and "persistence" in tags
+        )
 
     def create_rule(
         self,
@@ -209,18 +243,28 @@ class RulesClient:
                     f"persistence rule {name!r} exists but has no save_senml output"
                 )
         else:
-            rule = self.create_rule(
-                workspace_id,
-                name=name,
-                input_channel=channel_id,
-                input_topic=input_topic,
-                metadata={
-                    "managed_by": "smarter-adapter",
-                    "purpose": "senml-persistence",
-                },
-                tags=["smarter-adapter", "senml", "persistence"],
-                outputs=[{"type": "save_senml"}],
-            )
+            try:
+                rule = self.create_rule(
+                    workspace_id,
+                    name=name,
+                    input_channel=channel_id,
+                    input_topic=input_topic,
+                    metadata={
+                        "managed_by": "smarter-adapter",
+                        "purpose": "senml-persistence",
+                    },
+                    tags=["smarter-adapter", "senml", "persistence"],
+                    outputs=[{"type": "save_senml"}],
+                )
+            except RulesError as exc:
+                if exc.status == 422 and "rule limit for this edition reached" in str(exc).lower():
+                    raise RulesError(
+                        "Magistrala refused the persistence rule because the rule limit for this edition "
+                        "is already consumed. Release an existing Smarter Adapter-managed persistence "
+                        "rule before bootstrapping another workspace.",
+                        exc.status,
+                    ) from exc
+                raise
             created = True
 
         rule_id = str(rule.get("id") or "")
