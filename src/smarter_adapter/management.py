@@ -9,6 +9,14 @@ from threading import Thread
 from typing import Any, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .irrigap_config import (
+    IrrigapCatalogConflict,
+    IrrigapCatalogError,
+    IrrigapCatalogManager,
+    IrrigapCatalogNotFound,
+    IrrigapCatalogReadOnly,
+    irrigap_node_to_dict,
+)
 from .magistrala.reader import ReaderError, TimescaleReaderClient
 from .metrics import render_prometheus_metrics
 from .presence import DevicePresencePolicy
@@ -45,6 +53,10 @@ class _Handler(BaseHTTPRequestHandler):
     def presence(self) -> DevicePresencePolicy:
         return self.server.presence_policy  # type: ignore[attr-defined]
 
+    @property
+    def catalog(self) -> Optional[IrrigapCatalogManager]:
+        return self.server.catalog_manager  # type: ignore[attr-defined]
+
     def _authorized(self) -> bool:
         expected = self.server.api_token  # type: ignore[attr-defined]
         if not expected:
@@ -78,6 +90,25 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _error(self, status: int, message: str) -> None:
         self._send(status, {"error": message})
+
+    def _read_json_object(self, *, max_bytes: int = 65536) -> dict[str, Any]:
+        raw_length = self.headers.get("Content-Length", "")
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Content-Length is required") from exc
+        if length <= 0:
+            raise ValueError("JSON request body is required")
+        if length > max_bytes:
+            raise ValueError(f"JSON request body exceeds {max_bytes} bytes")
+        raw = self.rfile.read(length)
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid JSON request body: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ValueError("JSON request body must be an object")
+        return value
 
     @staticmethod
     def _raw_public(raw) -> dict:
@@ -155,6 +186,17 @@ class _Handler(BaseHTTPRequestHandler):
             counts[state] += 1
         return {"total": len(items), **counts}
 
+    def _catalog_summary(self) -> dict:
+        if self.catalog is None:
+            return {"configured": False, "source": "none", "writable": False, "total": 0}
+        snapshot = self.catalog.snapshot()
+        return {
+            "configured": True,
+            "source": snapshot.source,
+            "writable": self.catalog.writable,
+            "total": len(snapshot.nodes),
+        }
+
     def _status_payload(self) -> dict:
         base = self.runtime.base
         rule = self.runtime.persistence_rule
@@ -168,6 +210,7 @@ class _Handler(BaseHTTPRequestHandler):
             },
             "devices": self._presence_summary(devices),
             "quality": self._quality_summary(devices),
+            "catalog": self._catalog_summary(),
             "runtime": {
                 "workspace_id": base.workspace.id if base else None,
                 "channel_id": base.channel.id if base else None,
@@ -204,6 +247,24 @@ class _Handler(BaseHTTPRequestHandler):
         if not raw or "/" in raw:
             return None
         return unquote(raw)
+
+    @staticmethod
+    def _catalog_node_id(path: str) -> Optional[str]:
+        prefix = "/api/v2/catalog/devices/"
+        if not path.startswith(prefix):
+            return None
+        raw = path[len(prefix) :].strip("/")
+        if not raw or "/" in raw:
+            return None
+        return unquote(raw).strip().upper()
+
+    def _catalog_error(self, exc: IrrigapCatalogError) -> None:
+        if isinstance(exc, IrrigapCatalogNotFound):
+            self._error(404, str(exc))
+        elif isinstance(exc, (IrrigapCatalogConflict, IrrigapCatalogReadOnly)):
+            self._error(409, str(exc))
+        else:
+            self._error(400, str(exc))
 
     def _device_messages(self, parsed, path: str) -> bool:
         external_id = self._device_messages_external_id(path)
@@ -283,6 +344,25 @@ class _Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if path == "/api/v2/catalog/devices":
+                if self.catalog is None:
+                    self._error(503, "Irrigap catalog is not configured")
+                    return
+                self._send(200, self.catalog.public_payload())
+                return
+
+            catalog_id = self._catalog_node_id(path)
+            if catalog_id is not None:
+                if self.catalog is None:
+                    self._error(503, "Irrigap catalog is not configured")
+                    return
+                node = self.catalog.get_node(catalog_id)
+                if node is None:
+                    self._error(404, f"Irrigap node {catalog_id!r} not found")
+                    return
+                self._send(200, irrigap_node_to_dict(node))
+                return
+
             if self._device_messages(parsed, path):
                 return
 
@@ -341,6 +421,25 @@ class _Handler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path.rstrip("/")
         try:
+            if path == "/api/v2/catalog/devices":
+                if self.catalog is None:
+                    self._error(503, "Irrigap catalog is not configured")
+                    return
+                try:
+                    node = self.catalog.create_node(self._read_json_object())
+                except IrrigapCatalogError as exc:
+                    self._catalog_error(exc)
+                    return
+                self._send(
+                    201,
+                    {
+                        "status": "created",
+                        "item": irrigap_node_to_dict(node),
+                        "catalog_total": len(self.catalog.list_nodes()),
+                    },
+                )
+                return
+
             if path == "/api/v2/reconcile":
                 self.runtime.bootstrap(force=True)
                 cleared = self.runtime.clear_device_cache()
@@ -366,6 +465,68 @@ class _Handler(BaseHTTPRequestHandler):
             logger.exception("management POST failed")
             self._error(500, str(exc))
 
+    def do_PUT(self) -> None:  # noqa: N802
+        if not self._authorized():
+            self._error(401, "unauthorized")
+            return
+        path = urlparse(self.path).path.rstrip("/")
+        node_id = self._catalog_node_id(path)
+        if node_id is None:
+            self._error(404, "route not found")
+            return
+        if self.catalog is None:
+            self._error(503, "Irrigap catalog is not configured")
+            return
+        try:
+            try:
+                node = self.catalog.replace_node(node_id, self._read_json_object())
+            except IrrigapCatalogError as exc:
+                self._catalog_error(exc)
+                return
+            self._send(
+                200,
+                {
+                    "status": "updated",
+                    "item": irrigap_node_to_dict(node),
+                    "catalog_total": len(self.catalog.list_nodes()),
+                },
+            )
+        except ValueError as exc:
+            self._error(400, str(exc))
+        except Exception as exc:
+            logger.exception("management PUT failed")
+            self._error(500, str(exc))
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if not self._authorized():
+            self._error(401, "unauthorized")
+            return
+        path = urlparse(self.path).path.rstrip("/")
+        node_id = self._catalog_node_id(path)
+        if node_id is None:
+            self._error(404, "route not found")
+            return
+        if self.catalog is None:
+            self._error(503, "Irrigap catalog is not configured")
+            return
+        try:
+            try:
+                node = self.catalog.delete_node(node_id)
+            except IrrigapCatalogError as exc:
+                self._catalog_error(exc)
+                return
+            self._send(
+                200,
+                {
+                    "status": "deleted",
+                    "item": irrigap_node_to_dict(node),
+                    "catalog_total": len(self.catalog.list_nodes()),
+                },
+            )
+        except Exception as exc:
+            logger.exception("management DELETE failed")
+            self._error(500, str(exc))
+
 
 class ManagementServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -379,6 +540,7 @@ class ManagementServer(ThreadingHTTPServer):
         store: DeliveryQueueStore,
         reader: Optional[TimescaleReaderClient] = None,
         presence_policy: DevicePresencePolicy = DevicePresencePolicy(),
+        catalog_manager: Optional[IrrigapCatalogManager] = None,
         api_token: str = "",
     ) -> None:
         super().__init__(address, _Handler)
@@ -387,6 +549,7 @@ class ManagementServer(ThreadingHTTPServer):
         self.store = store
         self.reader = reader
         self.presence_policy = presence_policy
+        self.catalog_manager = catalog_manager
         self.api_token = api_token
 
 
@@ -399,6 +562,7 @@ def start_management_server(
     store: DeliveryQueueStore,
     reader: Optional[TimescaleReaderClient] = None,
     presence_policy: DevicePresencePolicy = DevicePresencePolicy(),
+    catalog_manager: Optional[IrrigapCatalogManager] = None,
     api_token: str = "",
 ) -> ManagementServer:
     server = ManagementServer(
@@ -408,6 +572,7 @@ def start_management_server(
         store=store,
         reader=reader,
         presence_policy=presence_policy,
+        catalog_manager=catalog_manager,
         api_token=api_token,
     )
     thread = Thread(target=server.serve_forever, name="smarter-adapter-management", daemon=True)
