@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from smarter_adapter.inputs import MQTTInputConfig
-from smarter_adapter.irrigap_config import load_irrigap_catalog
+from smarter_adapter.irrigap_config import IrrigapCatalogManager, load_irrigap_catalog
 from smarter_adapter.legacy_parser import LegacySensorParser
 from smarter_adapter.management import start_management_server
 from smarter_adapter.magistrala import (
@@ -154,9 +154,13 @@ def main() -> int:
         file_path=catalog_file,
         inline_json=catalog_inline,
     )
+    catalog_manager = IrrigapCatalogManager(
+        irrigap_catalog,
+        file_path=catalog_file if catalog_file and not catalog_inline else "",
+    )
     parsers = ParserRegistry(
         [
-            IrrigapChirpStackParser(irrigap_catalog.nodes),
+            IrrigapChirpStackParser(node_resolver=catalog_manager.get_node),
             LegacySensorParser(),
         ]
     )
@@ -236,7 +240,11 @@ def main() -> int:
         print(f"State DB:  {state_path}")
         print(f"Workspace: {runtime_config.workspace_name} ({runtime_config.workspace_alias})")
         print(f"Channel:   {runtime_config.channel_name} ({runtime_config.channel_alias})")
-        print(f"Irrigap:   catalog={irrigap_catalog.source} nodes={len(irrigap_catalog.nodes)}")
+        print(
+            "Irrigap:   "
+            f"catalog={catalog_manager.source} nodes={len(catalog_manager.list_nodes())} "
+            f"writable={str(catalog_manager.writable).lower()}"
+        )
         print(f"Atom:      {atom_url}")
         print(f"Publish:   {publish_url}")
         print(f"Rules:     {rules_url}")
@@ -265,6 +273,7 @@ def main() -> int:
             store=state_store,
             reader=reader,
             presence_policy=presence_policy,
+            catalog_manager=catalog_manager,
             api_token=api_token,
         )
         assert runtime.base is not None
