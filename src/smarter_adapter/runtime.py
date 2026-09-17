@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -52,6 +53,15 @@ def _device_attributes(event: ParsedEvent) -> dict:
         "application_id",
     )
     return {key: event.metadata[key] for key in allowed if key in event.metadata}
+
+
+def _quality_invalid_fields(issues: Tuple[QualityIssue, ...]) -> tuple[str, ...]:
+    fields = []
+    for issue in issues:
+        value = str(issue.source_field or issue.measurement or "").strip()
+        if value and value not in fields:
+            fields.append(value)
+    return tuple(fields)
 
 
 class SmarterAdapterRuntime:
@@ -175,6 +185,30 @@ class SmarterAdapterRuntime:
 
         return self._remote_device(base, device_type, parsed, raw), "remote"
 
+    def _record_quality(
+        self,
+        base: BaseResources,
+        parsed: ParsedEvent,
+        raw: RawEvent,
+        *,
+        status: str,
+        issues: Tuple[QualityIssue, ...],
+    ) -> None:
+        if self.state_store is None:
+            return
+        setter = getattr(self.state_store, "set_device_quality", None)
+        if not callable(setter):
+            return
+        setter(
+            base.workspace.id,
+            base.channel.id,
+            parsed.external_device_id,
+            quality_status=status,
+            invalid_fields=_quality_invalid_fields(issues),
+            evaluated_at=time.time(),
+            source_received_at=raw.received_at,
+        )
+
     def process(self, raw: RawEvent) -> ProcessResult:
         outcome = self.pipeline.process(raw)
         parsed = outcome.event
@@ -214,6 +248,13 @@ class SmarterAdapterRuntime:
                 base.channel.id,
                 parsed.external_device_id,
                 seen_at=raw.received_at,
+            )
+            self._record_quality(
+                base,
+                parsed,
+                raw,
+                status=outcome.quality_status,
+                issues=outcome.quality_issues,
             )
 
         return ProcessResult(
