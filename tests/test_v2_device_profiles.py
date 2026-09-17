@@ -3,7 +3,9 @@ from __future__ import annotations
 import unittest
 
 from smarter_adapter.device_profiles import DeviceProfileRegistry
+from smarter_adapter.magistrala.atom import AtomConfig
 from smarter_adapter.magistrala.control_plane import ControlPlane
+from smarter_adapter.magistrala.lifecycle import LifecycleAtomClient
 from smarter_adapter.magistrala.publisher import PublishResult
 from smarter_adapter.magistrala.rules import PersistenceRuleRef
 from smarter_adapter.models import Measurement, ParsedEvent, RawEvent
@@ -263,6 +265,50 @@ class DeviceProfileTests(unittest.TestCase):
         keys = {item["key"] for item in atom.device_types}
         self.assertIn("smarter-adapter-sensor", keys)
         self.assertIn("smarter-adapter-teros12", keys)
+
+    def test_lifecycle_atom_client_updates_only_profile_binding(self):
+        client = LifecycleAtomClient(AtomConfig(base_url="http://atom", token="token"))
+        seen = {}
+
+        def fake_graphql(query, variables=None, **kwargs):
+            seen["query"] = query
+            seen["variables"] = dict(variables or {})
+            return {
+                "updateEntity": {
+                    "id": "device-1",
+                    "kind": "device",
+                    "profileId": "profile-teros12",
+                    "profileVersionId": "version-teros12-1",
+                    "name": "teros12-sector1.3",
+                    "alias": "teros12-sector1-3",
+                    "externalId": "teros12-sector1.3",
+                    "tenantId": "ws-1",
+                    "objectGroupIds": [],
+                    "status": "active",
+                    "attributes": {"managed_by": "smarter-adapter", "sensor": "teros12"},
+                    "createdAt": "",
+                    "updatedAt": "",
+                }
+            }
+
+        client._graphql = fake_graphql  # type: ignore[method-assign]
+        result = client.update_device_profile(
+            "device-1",
+            profile_id="profile-teros12",
+            profile_version_id="version-teros12-1",
+        )
+
+        self.assertIn("mutation UpdateDeviceProfile", seen["query"])
+        self.assertEqual(seen["variables"]["id"], "device-1")
+        self.assertEqual(
+            seen["variables"]["input"],
+            {
+                "profileId": "profile-teros12",
+                "profileVersionId": "version-teros12-1",
+            },
+        )
+        self.assertEqual(result["id"], "device-1")
+        self.assertEqual(result["externalId"], "teros12-sector1.3")
 
 
 if __name__ == "__main__":
