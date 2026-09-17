@@ -12,7 +12,7 @@ from ..models import Measurement, ParsedEvent, RawEvent
 
 @dataclass(frozen=True)
 class IrrigapNode:
-    """Site metadata for one deployed Irrigap/Greenstick node."""
+    """Deployment metadata for one Irrigap/Greenstick node."""
 
     id: str
     device: str
@@ -20,20 +20,6 @@ class IrrigapNode:
     sub_location: str
     depths: Mapping[int, str] = field(default_factory=dict)
 
-
-DEFAULT_IRRIGAP_NODES: Tuple[IrrigapNode, ...] = (
-    IrrigapNode("3303", "greenstick", "Sector_3", "mz_1", {31: "15cm", 32: "35cm", 33: "55cm"}),
-    IrrigapNode("3304", "greenstick", "Sector_4", "mz_1", {31: "15cm", 32: "35cm", 33: "55cm"}),
-    IrrigapNode("3306", "greenstick", "Sector_6", "mz_1", {31: "15cm", 32: "35cm", 33: "55cm"}),
-    IrrigapNode("3307", "greenstick", "Sector_7", "mz_1", {31: "15cm", 32: "35cm", 33: "55cm"}),
-    IrrigapNode("2303", "teros12", "Sector_3", "mz_1", {31: "15cm"}),
-    IrrigapNode("2304", "teros12", "Sector_4", "mz_1", {31: "15cm"}),
-    IrrigapNode("2305", "teros12", "Sector_5", "mz_1", {31: "15cm"}),
-    IrrigapNode("2306", "teros12", "Sector_6", "mz_1", {31: "15cm"}),
-    IrrigapNode("2307", "teros12", "Sector_7", "mz_1", {31: "15cm"}),
-    IrrigapNode("2311", "teros12", "Test_1", "mz_1", {31: "15cm"}),
-    IrrigapNode("2313", "teros12", "Test_3", "mz_1", {31: "15cm"}),
-)
 
 _KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
@@ -110,21 +96,20 @@ def _invalid_source(source_field: str) -> Dict[str, Any]:
 class IrrigapChirpStackParser:
     """Parse the ChirpStack MQTT envelope used by the Irrigap deployment.
 
-    Expected envelope fields are the ones supplied by the deployment flow:
-    `data` (base64 sensor payload), `time`, `deviceInfo.deviceName` and
-    `fPort`. The decoded payload is key/value ultralight text, for example::
+    Expected envelope fields are `data` (base64 sensor payload), `time`,
+    `deviceInfo.deviceName` and `fPort`. The decoded payload is key/value
+    ultralight text, for example::
 
         S|2509170900|I|3303|M1|1261|T1|22.1|C1|640
 
-    Site metadata is injected as a node catalog instead of being coupled to
-    the transport. The collaborator-provided catalog is the default for now
-    and can later move entirely to configuration without changing the parser
-    contract.
+    Deployment metadata is injected through ``nodes``. The parser deliberately
+    has no embedded field catalog: unknown nodes still parse and are simply
+    emitted without location/depth metadata.
     """
 
     name = "chirpstack-irrigap-v2"
 
-    def __init__(self, nodes: Tuple[IrrigapNode, ...] = DEFAULT_IRRIGAP_NODES) -> None:
+    def __init__(self, nodes: Tuple[IrrigapNode, ...] = ()) -> None:
         self._nodes = {node.id.upper(): node for node in nodes}
 
     def supports(self, event: RawEvent) -> bool:
@@ -153,7 +138,6 @@ class IrrigapChirpStackParser:
         values = _pairs(raw_text)
         node_id = str(values.get("I") or "").strip().upper()
         if not node_id:
-            # Compatibility fallback for the collaborator's positional flow.
             pieces = raw_text.split("|")
             if len(pieces) > 3:
                 node_id = pieces[3].strip().upper()
@@ -164,7 +148,6 @@ class IrrigapChirpStackParser:
         temperature = _first_numeric(values, "T")
         ec_raw = _first_numeric(values, "C")
 
-        # Positional fallback mirrors the supplied Node-RED implementation.
         pieces = raw_text.split("|")
         if moisture_raw is None and len(pieces) > 5:
             try:
@@ -195,9 +178,6 @@ class IrrigapChirpStackParser:
         node = self._nodes.get(node_id)
         timestamp = _iso_epoch(envelope.get("time")) or event.received_at
 
-        # The deployment uses negative raw values as invalid/sentinel values.
-        # Temperature -1 alone can be physically meaningful, so classify it as
-        # a sentinel only when the raw moisture and EC fields are invalid too.
         moisture_invalid = moisture_raw is not None and moisture_raw < 0.0
         ec_invalid = ec_raw is not None and ec_raw < 0.0
         packet_sentinel = bool(
@@ -275,12 +255,10 @@ class IrrigapChirpStackParser:
         if len(topic_parts) >= 2 and topic_parts[0] == "application":
             metadata["application_id"] = topic_parts[1]
         if node is not None:
-            metadata.update(
-                {
-                    "location": node.location,
-                    "sub_location": node.sub_location,
-                }
-            )
+            if node.location:
+                metadata["location"] = node.location
+            if node.sub_location:
+                metadata["sub_location"] = node.sub_location
             depth = node.depths.get(f_port)
             if depth:
                 metadata["depth"] = depth
@@ -293,7 +271,6 @@ class IrrigapChirpStackParser:
 
 
 __all__ = [
-    "DEFAULT_IRRIGAP_NODES",
     "IrrigapChirpStackParser",
     "IrrigapNode",
 ]
