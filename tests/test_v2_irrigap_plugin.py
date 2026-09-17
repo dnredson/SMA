@@ -7,12 +7,24 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from smarter_adapter.models import RawEvent
-from smarter_adapter.parsers import IrrigapChirpStackParser
+from smarter_adapter.parsers import IrrigapChirpStackParser, IrrigapNode
 from smarter_adapter.pipeline import ParsePipeline
 from smarter_adapter.plugins import ParserRegistry
 
 
+TEST_NODES = (
+    IrrigapNode("3303", "greenstick", "Sector_3", "mz_1", {31: "15cm", 32: "35cm", 33: "55cm"}),
+    IrrigapNode("2303", "teros12", "Sector_3", "mz_1", {31: "15cm"}),
+    IrrigapNode("2311", "teros12", "Test_1", "mz_1", {31: "15cm"}),
+    IrrigapNode("2313", "teros12", "Test_3", "mz_1", {31: "15cm"}),
+)
+
+
 class IrrigapChirpStackPluginTests(unittest.TestCase):
+    @staticmethod
+    def _parser():
+        return IrrigapChirpStackParser(TEST_NODES)
+
     def _event(
         self,
         *,
@@ -37,11 +49,11 @@ class IrrigapChirpStackPluginTests(unittest.TestCase):
         )
 
     def test_supports_collaborator_chirpstack_envelope(self):
-        parser = IrrigapChirpStackParser()
+        parser = self._parser()
         self.assertTrue(parser.supports(self._event()))
 
     def test_greenstick_payload_is_normalized_with_site_metadata(self):
-        parser = IrrigapChirpStackParser()
+        parser = self._parser()
         parsed = parser.parse(self._event())
         self.assertIsNotNone(parsed)
         assert parsed is not None
@@ -65,7 +77,7 @@ class IrrigapChirpStackPluginTests(unittest.TestCase):
         self.assertLess(values["soil.moisture"].value, 100.0)
 
     def test_teros12_catalog_and_depth_are_supported(self):
-        parser = IrrigapChirpStackParser()
+        parser = self._parser()
         parsed = parser.parse(
             self._event(node_id="2303", f_port=31, device_name="teros12-2303")
         )
@@ -76,7 +88,7 @@ class IrrigapChirpStackPluginTests(unittest.TestCase):
         self.assertEqual(parsed.metadata["depth"], "15cm")
 
     def test_unknown_node_still_parses_without_site_metadata(self):
-        parser = IrrigapChirpStackParser()
+        parser = self._parser()
         parsed = parser.parse(
             self._event(node_id="3999", f_port=31, device_name="unknown-3999")
         )
@@ -86,8 +98,20 @@ class IrrigapChirpStackPluginTests(unittest.TestCase):
         self.assertNotIn("location", parsed.metadata)
         self.assertNotIn("depth", parsed.metadata)
 
+    def test_parser_has_no_embedded_deployment_catalog(self):
+        parser = IrrigapChirpStackParser()
+        parsed = parser.parse(
+            self._event(node_id="3303", f_port=31, device_name="greenstick-3303")
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.metadata["sensor"], "irrigap")
+        self.assertNotIn("location", parsed.metadata)
+        self.assertNotIn("sub_location", parsed.metadata)
+        self.assertNotIn("depth", parsed.metadata)
+
     def test_full_minus_one_sentinel_becomes_quality_diagnostics(self):
-        pipeline = ParsePipeline(ParserRegistry([IrrigapChirpStackParser()]))
+        pipeline = ParsePipeline(ParserRegistry([self._parser()]))
         outcome = pipeline.process(
             self._event(
                 node_id="2313",
@@ -112,7 +136,7 @@ class IrrigapChirpStackPluginTests(unittest.TestCase):
         )
 
     def test_minus_one_temperature_alone_is_not_assumed_to_be_sentinel(self):
-        pipeline = ParsePipeline(ParserRegistry([IrrigapChirpStackParser()]))
+        pipeline = ParsePipeline(ParserRegistry([self._parser()]))
         outcome = pipeline.process(
             self._event(
                 node_id="2311",
