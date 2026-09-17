@@ -189,42 +189,6 @@ def main() -> int:
 
     def on_result(result):
         parsed = result.parsed_event
-        node_id = str(parsed.metadata.get("node_id") or "").strip()
-        if node_id and runtime.base is not None:
-            observation_metadata = {
-                key: parsed.metadata[key]
-                for key in (
-                    "sensor",
-                    "node_id",
-                    "location",
-                    "sub_location",
-                    "depth",
-                    "application_id",
-                    "f_port",
-                )
-                if key in parsed.metadata
-            }
-            try:
-                state_store.set_device_observation(
-                    runtime.base.workspace.id,
-                    runtime.base.channel.id,
-                    parsed.external_device_id,
-                    node_id=node_id,
-                    sensor=str(parsed.metadata.get("sensor") or ""),
-                    metadata=observation_metadata,
-                    observed_at=(
-                        float(parsed.metadata["bt"])
-                        if parsed.metadata.get("bt") is not None
-                        else None
-                    ),
-                )
-            except Exception as exc:
-                print(
-                    f"WARN catalog-binding {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
         issue_fields = []
         for issue in result.quality_issues:
             field = issue.source_field or issue.measurement
