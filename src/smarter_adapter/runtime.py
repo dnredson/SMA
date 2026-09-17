@@ -81,6 +81,18 @@ class SmarterAdapterRuntime:
         with self._control_lock:
             return len(self._devices)
 
+    def clear_device_cache(self) -> int:
+        """Drop only the in-memory device fast path.
+
+        Persistent mappings remain intact, so the next event resolves from the
+        state store before falling back to Atom. This is useful for explicit
+        administrative reconciliation without losing durable state.
+        """
+        with self._control_lock:
+            count = len(self._devices)
+            self._devices.clear()
+            return count
+
     def bootstrap(self) -> None:
         with self._control_lock:
             if self.base is not None and self.device_type is not None and self.persistence_rule is not None:
