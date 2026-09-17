@@ -8,12 +8,17 @@ from urllib.parse import unquote, urlparse
 
 from .device_lifecycle import DeviceLifecycleController, LifecycleRemoteError
 from .management import _Handler
+from .reconciliation import ControlPlaneReconciler
 
 
 class _LifecycleHandler(_Handler):
     @property
     def lifecycle(self) -> DeviceLifecycleController:
         return self.server.lifecycle_controller  # type: ignore[attr-defined]
+
+    @property
+    def reconciler(self) -> ControlPlaneReconciler:
+        return self.server.reconciler  # type: ignore[attr-defined]
 
     @staticmethod
     def _lifecycle_action(path: str) -> Optional[tuple[str, str]]:
@@ -102,6 +107,30 @@ class _LifecycleHandler(_Handler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/")
+
+        if path == "/api/v2/reconcile":
+            if not self._authorized():
+                self._error(401, "unauthorized")
+                return
+            try:
+                body = self._optional_json_object()
+                repair = body.get("repair", True)
+                include_devices = body.get("include_devices", True)
+                if not isinstance(repair, bool):
+                    raise ValueError("repair must be a boolean")
+                if not isinstance(include_devices, bool):
+                    raise ValueError("include_devices must be a boolean")
+                result = self.reconciler.reconcile(
+                    repair=repair,
+                    include_devices=include_devices,
+                )
+                self._send(200, result)
+            except ValueError as exc:
+                self._error(400, str(exc))
+            except Exception as exc:
+                self._error(500, str(exc))
+            return
+
         action = self._lifecycle_action(path)
         if action is None:
             super().do_POST()
@@ -172,6 +201,7 @@ class LifecycleManagementServer(ThreadingHTTPServer):
         presence_policy=None,
         catalog_manager=None,
         api_token: str = "",
+        reconciler: Optional[ControlPlaneReconciler] = None,
     ) -> None:
         super().__init__(address, _LifecycleHandler)
         self.service = service
@@ -182,6 +212,12 @@ class LifecycleManagementServer(ThreadingHTTPServer):
         self.catalog_manager = catalog_manager
         self.api_token = api_token
         self.lifecycle_controller = lifecycle_controller
+        self.reconciler = reconciler or ControlPlaneReconciler(
+            runtime=runtime,
+            store=store,
+            catalog=catalog_manager,
+            atom=lifecycle_controller.atom,
+        )
 
 
 def start_lifecycle_management_server(
@@ -196,6 +232,7 @@ def start_lifecycle_management_server(
     presence_policy=None,
     catalog_manager=None,
     api_token: str = "",
+    reconciler: Optional[ControlPlaneReconciler] = None,
 ) -> LifecycleManagementServer:
     server = LifecycleManagementServer(
         (host, int(port)),
@@ -207,6 +244,7 @@ def start_lifecycle_management_server(
         presence_policy=presence_policy,
         catalog_manager=catalog_manager,
         api_token=api_token,
+        reconciler=reconciler,
     )
     thread = Thread(
         target=server.serve_forever,
