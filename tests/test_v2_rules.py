@@ -126,6 +126,55 @@ class RulesClientTests(unittest.TestCase):
         with self.assertRaises(RulesError):
             client.ensure_senml_persistence("ws-1", "ch-1")
 
+    def test_managed_persistence_rule_guard(self):
+        good = {
+            "metadata": {
+                "managed_by": "smarter-adapter",
+                "purpose": "senml-persistence",
+            },
+            "tags": ["smarter-adapter", "senml", "persistence"],
+            "outputs": [{"type": "save_senml"}],
+        }
+        self.assertTrue(RulesClient.is_managed_persistence_rule(good))
+
+        bad = dict(good)
+        bad["metadata"] = {"managed_by": "someone-else"}
+        self.assertFalse(RulesClient.is_managed_persistence_rule(bad))
+
+    def test_get_and_delete_rule(self):
+        calls = []
+
+        def opener(req, timeout):
+            calls.append((req.method, req.full_url))
+            if req.method == "GET":
+                return _FakeResponse(200, {"id": "rule-1", "name": "x"})
+            if req.method == "DELETE":
+                return _FakeResponse(204, {})
+            raise AssertionError(req.method)
+
+        client = RulesClient("http://magistrala", lambda: "token", opener=opener)
+        self.assertEqual(client.get_rule("ws-1", "rule-1")["id"], "rule-1")
+        client.delete_rule("ws-1", "rule-1")
+        self.assertEqual([method for method, _ in calls], ["GET", "DELETE"])
+
+    def test_edition_limit_error_is_explained(self):
+        def opener(req, timeout):
+            if req.method == "GET":
+                return _FakeResponse(200, {"rules": []})
+            raise error.HTTPError(
+                req.full_url,
+                422,
+                "Unprocessable Entity",
+                {},
+                io.BytesIO(b'{"message":"rule limit for this edition reached"}'),
+            )
+
+        client = RulesClient("http://magistrala", lambda: "token", opener=opener)
+        with self.assertRaises(RulesError) as ctx:
+            client.ensure_senml_persistence("ws-2", "ch-2")
+        self.assertEqual(ctx.exception.status, 422)
+        self.assertIn("Release an existing", str(ctx.exception))
+
     def test_401_invalidates_token_and_retries_once(self):
         calls = {"count": 0, "invalidations": 0}
         tokens = iter(["old", "new"])
