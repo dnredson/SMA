@@ -11,6 +11,8 @@ from urllib import error, request
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
+from smarter_adapter.magistrala.control_plane import DeviceRef
+from smarter_adapter.magistrala.reader import MessagesPage
 from smarter_adapter.management import start_management_server
 from smarter_adapter.models import RawEvent
 from smarter_adapter.plugins import ParserNotFound
@@ -49,6 +51,30 @@ class _Service:
         self.inputs = (SimpleNamespace(connected=True, last_error=None),)
 
 
+class _Reader:
+    def __init__(self):
+        self.calls = []
+
+    def list_device_messages(self, workspace_id, channel_id, device_id, **kwargs):
+        self.calls.append((workspace_id, channel_id, device_id, kwargs))
+        return MessagesPage(
+            offset=int(kwargs.get("offset", 0)),
+            limit=int(kwargs.get("limit", 100)),
+            total=1,
+            messages=(
+                {
+                    "device_id": device_id,
+                    "publisher": "atom-device-1",
+                    "name": f"{device_id}:soil.temperature",
+                    "unit": "Cel",
+                    "value": 25.3,
+                },
+            ),
+            order=str(kwargs.get("order", "time")),
+            direction=str(kwargs.get("direction", "desc")),
+        )
+
+
 def _http(method: str, url: str, token: str = ""):
     headers = {"Accept": "application/json"}
     if token:
@@ -65,12 +91,14 @@ class ManagementAPITests(unittest.TestCase):
         self.store = SQLiteManagementStore(Path(self.tmp.name) / "state.sqlite3")
         self.runtime = _Runtime()
         self.service = _Service()
+        self.reader = _Reader()
         self.server = start_management_server(
             host="127.0.0.1",
             port=0,
             service=self.service,
             runtime=self.runtime,
             store=self.store,
+            reader=self.reader,
             api_token="secret",
         )
         host, port = self.server.server_address[:2]
@@ -91,6 +119,7 @@ class ManagementAPITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ready")
         self.assertTrue(body["inputs_ready"])
+        self.assertTrue(body["reader_configured"])
 
     def test_admin_routes_require_token(self):
         with self.assertRaises(error.HTTPError) as ctx:
@@ -102,6 +131,7 @@ class ManagementAPITests(unittest.TestCase):
         self.assertEqual(body["queues"], {"retry": 0, "dlq": 0})
         self.assertEqual(body["runtime"]["workspace_id"], "ws-1")
         self.assertEqual(body["service"]["received"], 3)
+        self.assertTrue(body["runtime"]["reader_configured"])
 
     def test_dlq_can_be_requeued_through_http(self):
         raw = RawEvent(
@@ -141,6 +171,43 @@ class ManagementAPITests(unittest.TestCase):
         self.assertEqual(self.runtime.bootstrap_calls, 1)
         self.assertTrue(self.runtime.bootstrap_force)
         self.assertEqual(self.runtime.clear_calls, 1)
+
+    def test_managed_device_telemetry_is_exposed_through_reader(self):
+        device = DeviceRef(
+            id="atom-device-1",
+            workspace_id="ws-1",
+            external_id="teros12-sector1.1",
+            name="teros12-sector1.1",
+            profile_id="profile-1",
+            profile_version_id="version-1",
+        )
+        self.store.upsert_device(device, channel_id="ch-1", seen_at=100.0)
+
+        status, body = _http(
+            "GET",
+            self.base
+            + "/api/v2/devices/teros12-sector1.1/messages?limit=20&dir=desc&name=teros12-sector1.1%3Asoil.temperature",
+            token="secret",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["external_id"], "teros12-sector1.1")
+        self.assertEqual(body["atom_device_id"], "atom-device-1")
+        self.assertEqual(body["total"], 1)
+        self.assertEqual(body["messages"][0]["value"], 25.3)
+        self.assertEqual(self.reader.calls[0][0:3], ("ws-1", "ch-1", "teros12-sector1.1"))
+        self.assertEqual(self.reader.calls[0][3]["limit"], 20)
+        self.assertEqual(
+            self.reader.calls[0][3]["name"],
+            "teros12-sector1.1:soil.temperature",
+        )
+
+        with self.assertRaises(error.HTTPError) as ctx:
+            _http(
+                "GET",
+                self.base + "/api/v2/devices/not-managed/messages",
+                token="secret",
+            )
+        self.assertEqual(ctx.exception.code, 404)
 
 
 if __name__ == "__main__":
