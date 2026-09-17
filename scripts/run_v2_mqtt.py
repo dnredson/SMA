@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from smarter_adapter.inputs import MQTTInputConfig
 from smarter_adapter.legacy_parser import LegacySensorParser
+from smarter_adapter.management import start_management_server
 from smarter_adapter.magistrala import AtomClient, AtomConfig, ControlPlane, RulesClient
 from smarter_adapter.magistrala.publisher import FluxMQPublisher
 from smarter_adapter.parsers import IrrigapChirpStackParser
@@ -21,7 +22,7 @@ from smarter_adapter.plugins import ParserRegistry
 from smarter_adapter.reliability import RetryPolicy
 from smarter_adapter.runtime import RuntimeConfig, SmarterAdapterRuntime
 from smarter_adapter.service import SmarterAdapterService
-from smarter_adapter.storage import SQLiteStateStore
+from smarter_adapter.storage import SQLiteManagementStore
 
 
 def env(name: str, default: str = "") -> str:
@@ -106,7 +107,7 @@ def main() -> int:
     pipeline = ParsePipeline(parsers)
 
     state_path = Path(env("SMA_STATE_DB", str(ROOT / ".state" / "smarter_adapter.sqlite3")))
-    state_store = SQLiteStateStore(state_path)
+    state_store = SQLiteManagementStore(state_path)
     runtime = SmarterAdapterRuntime(
         pipeline=pipeline,
         control=control,
@@ -151,6 +152,11 @@ def main() -> int:
         retry_policy=retry_policy,
     )
 
+    api_host = env("SMA_API_HOST", "127.0.0.1")
+    api_port = int(env("SMA_API_PORT", "8082"))
+    api_token = env("SMA_API_TOKEN")
+    management = None
+
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda signum, frame: stop.set())
     signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
@@ -160,6 +166,7 @@ def main() -> int:
         print(f"Atom:      {atom_url}")
         print(f"Publish:   {publish_url}")
         print(f"Rules:     {rules_url}")
+        print(f"API:       http://{api_host}:{api_port}")
         print(
             "Retry:     "
             f"max={retry_policy.max_attempts} base={retry_policy.base_delay_seconds}s "
@@ -170,6 +177,14 @@ def main() -> int:
             print(f"Input {index}: {config.host}:{config.port} topic={config.topic} source={config.source}")
         print("Bootstrapping and starting inputs...")
         service.start()
+        management = start_management_server(
+            host=api_host,
+            port=api_port,
+            service=service,
+            runtime=runtime,
+            store=state_store,
+            api_token=api_token,
+        )
         assert runtime.base is not None
         assert runtime.persistence_rule is not None
         print(f"Workspace: {runtime.base.workspace.id}")
@@ -178,6 +193,9 @@ def main() -> int:
         print("RUNNING: Ctrl+C to stop", flush=True)
         stop.wait()
     finally:
+        if management is not None:
+            management.shutdown()
+            management.server_close()
         service.stop()
         stats = service.stats
         pending_retry = state_store.count_retries()
