@@ -49,7 +49,7 @@ class _FailingControl:
     def ensure_base(self, **kwargs):
         return self.base
 
-    def ensure_device_type(self, workspace_id):
+    def ensure_device_type(self, workspace_id, **kwargs):
         return self.device_type
 
     def ensure_device(self, workspace_id, channel_id, external_id, **kwargs):
