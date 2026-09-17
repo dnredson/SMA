@@ -11,6 +11,7 @@ from urllib import error, request
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
+from smarter_adapter.irrigap_config import IrrigapCatalogManager, load_irrigap_catalog
 from smarter_adapter.magistrala.control_plane import DeviceRef
 from smarter_adapter.magistrala.reader import MessagesPage
 from smarter_adapter.management import start_management_server
@@ -76,11 +77,15 @@ class _Reader:
         )
 
 
-def _http(method: str, url: str, token: str = ""):
+def _http(method: str, url: str, token: str = "", json_body=None):
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = "Bearer " + token
-    req = request.Request(url, headers=headers, method=method)
+    data = None
+    if json_body is not None:
+        data = json.dumps(json_body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = request.Request(url, headers=headers, data=data, method=method)
     with request.urlopen(req, timeout=3) as response:
         raw = response.read() or b"{}"
         return response.status, json.loads(raw.decode("utf-8"))
@@ -89,7 +94,29 @@ def _http(method: str, url: str, token: str = ""):
 class ManagementAPITests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.store = SQLiteManagementStore(Path(self.tmp.name) / "state.sqlite3")
+        tmp_path = Path(self.tmp.name)
+        self.store = SQLiteManagementStore(tmp_path / "state.sqlite3")
+        self.catalog_path = tmp_path / "irrigap.nodes.json"
+        self.catalog_path.write_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "id": "2313",
+                            "device": "teros12",
+                            "location": "Test_3",
+                            "sub_location": "mz_1",
+                            "depths": {"31": "15cm"},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.catalog = IrrigapCatalogManager(
+            load_irrigap_catalog(file_path=str(self.catalog_path)),
+            file_path=str(self.catalog_path),
+        )
         self.runtime = _Runtime()
         self.service = _Service()
         self.reader = _Reader()
@@ -104,6 +131,7 @@ class ManagementAPITests(unittest.TestCase):
                 stale_after_seconds=60,
                 offline_after_seconds=120,
             ),
+            catalog_manager=self.catalog,
             api_token="secret",
         )
         host, port = self.server.server_address[:2]
@@ -137,6 +165,8 @@ class ManagementAPITests(unittest.TestCase):
         self.assertEqual(body["runtime"]["workspace_id"], "ws-1")
         self.assertEqual(body["service"]["received"], 3)
         self.assertTrue(body["runtime"]["reader_configured"])
+        self.assertEqual(body["catalog"]["total"], 1)
+        self.assertTrue(body["catalog"]["writable"])
         self.assertEqual(
             body["devices"],
             {
@@ -148,6 +178,67 @@ class ManagementAPITests(unittest.TestCase):
                 "offline_after_seconds": 120,
             },
         )
+
+    def test_catalog_crud_is_exposed_and_persisted(self):
+        status, body = _http(
+            "GET",
+            self.base + "/api/v2/catalog/devices",
+            token="secret",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["total"], 1)
+        self.assertTrue(body["writable"])
+
+        status, created = _http(
+            "POST",
+            self.base + "/api/v2/catalog/devices",
+            token="secret",
+            json_body={
+                "id": "2314",
+                "device": "teros12",
+                "location": "Sector_8",
+                "sub_location": "mz_2",
+                "depths": {"31": "15cm"},
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["item"]["id"], "2314")
+        self.assertEqual(created["catalog_total"], 2)
+
+        status, item = _http(
+            "GET",
+            self.base + "/api/v2/catalog/devices/2314",
+            token="secret",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(item["location"], "Sector_8")
+
+        status, updated = _http(
+            "PUT",
+            self.base + "/api/v2/catalog/devices/2314",
+            token="secret",
+            json_body={
+                "device": "teros12",
+                "location": "Sector_8B",
+                "sub_location": "mz_2",
+                "depths": {"31": "20cm"},
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["item"]["location"], "Sector_8B")
+        self.assertEqual(updated["item"]["depths"]["31"], "20cm")
+
+        status, deleted = _http(
+            "DELETE",
+            self.base + "/api/v2/catalog/devices/2314",
+            token="secret",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertEqual(deleted["catalog_total"], 1)
+
+        reloaded = load_irrigap_catalog(file_path=str(self.catalog_path))
+        self.assertEqual([node.id for node in reloaded.nodes], ["2313"])
 
     def test_dlq_can_be_requeued_through_http(self):
         raw = RawEvent(
