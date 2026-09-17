@@ -5,7 +5,7 @@ import logging
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
-from typing import Any, Optional, Tuple
+from typing import Any, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .reliability import DeliveryQueueStore
@@ -137,10 +137,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(401, "unauthorized")
             return
 
-        query = parse_qs(parsed.query)
-        limit = min(max(int((query.get("limit") or [100])[0]), 1), 1000)
-
         try:
+            query = parse_qs(parsed.query)
+            limit = min(max(int((query.get("limit") or [100])[0]), 1), 1000)
+
             if path == "/api/v2/status":
                 self._send(200, self._status_payload())
                 return
@@ -197,9 +197,9 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/")
         try:
             if path == "/api/v2/reconcile":
-                self.runtime.bootstrap()
-                self.runtime.clear_device_cache()
-                self._send(200, {"status": "reconciled"})
+                self.runtime.bootstrap(force=True)
+                cleared = self.runtime.clear_device_cache()
+                self._send(200, {"status": "reconciled", "cleared_device_cache": cleared})
                 return
 
             prefix = "/api/v2/dlq/"
