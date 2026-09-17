@@ -144,9 +144,16 @@ class BindingSQLiteManagementStore(SQLiteManagementStore):
                     sensor, metadata_json, first_observed_at, last_observed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id, channel_id, node_id, external_id) DO UPDATE SET
-                    sensor = excluded.sensor,
-                    metadata_json = excluded.metadata_json,
-                    last_observed_at = excluded.last_observed_at
+                    sensor = CASE
+                        WHEN excluded.last_observed_at >= catalog_node_observations.last_observed_at
+                        THEN excluded.sensor ELSE catalog_node_observations.sensor END,
+                    metadata_json = CASE
+                        WHEN excluded.last_observed_at >= catalog_node_observations.last_observed_at
+                        THEN excluded.metadata_json ELSE catalog_node_observations.metadata_json END,
+                    last_observed_at = MAX(
+                        catalog_node_observations.last_observed_at,
+                        excluded.last_observed_at
+                    )
                 """,
                 (
                     str(workspace_id),
@@ -233,7 +240,8 @@ class BindingSQLiteManagementStore(SQLiteManagementStore):
 
         # Keep the weaker physical observation in sync as well. This also
         # backfills lifecycle information for callers that only use the older
-        # managed binding API.
+        # managed binding API. The upsert is monotonic, so replayed event times
+        # cannot move last_observed_at backwards.
         self.observe_catalog_node(
             workspace_id,
             channel_id,
