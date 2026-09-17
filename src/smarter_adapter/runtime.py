@@ -32,7 +32,7 @@ class ProcessResult:
 
 
 def _safe_alias(value: str) -> str:
-    text = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
+    text = re.sub(r"[^a-z0-9-]+", "-", value.strip().lower()).strip("-")
     return text[:120] or "device"
 
 
