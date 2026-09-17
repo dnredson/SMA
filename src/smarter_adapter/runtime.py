@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -58,8 +59,8 @@ class SmarterAdapterRuntime:
     Base resources and the persistence rule are reconciled once at bootstrap.
     Devices are reconciled lazily on their first observed message. The runtime
     first checks its in-memory fast path, then an optional durable state store,
-    and only then Atom. This preserves external-id -> Atom UUID mappings across
-    process restarts without coupling the pipeline to a specific database.
+    and only then Atom. Control-plane reconciliation is serialized so multiple
+    MQTT inputs cannot race while discovering the same new device.
     """
 
     def __init__(
@@ -82,70 +83,79 @@ class SmarterAdapterRuntime:
         self.device_type: Optional[DeviceTypeRef] = None
         self.persistence_rule: Optional[PersistenceRuleRef] = None
         self._devices: Dict[str, DeviceRef] = {}
+        self._control_lock = threading.RLock()
 
     @property
     def device_cache_size(self) -> int:
-        return len(self._devices)
+        with self._control_lock:
+            return len(self._devices)
 
     def bootstrap(self) -> None:
-        base = self.control.ensure_base(
-            workspace_name=self.config.workspace_name,
-            workspace_alias=self.config.workspace_alias,
-            channel_name=self.config.channel_name,
-            channel_alias=self.config.channel_alias,
-        )
-        device_type = self.control.ensure_device_type(base.workspace.id)
-        persistence = self.rules.ensure_senml_persistence(
-            base.workspace.id,
-            base.channel.id,
-            name=self.config.persistence_rule_name,
-        )
-        self.base = base
-        self.device_type = device_type
-        self.persistence_rule = persistence
+        with self._control_lock:
+            if (
+                self.base is not None
+                and self.device_type is not None
+                and self.persistence_rule is not None
+            ):
+                return
+            base = self.control.ensure_base(
+                workspace_name=self.config.workspace_name,
+                workspace_alias=self.config.workspace_alias,
+                channel_name=self.config.channel_name,
+                channel_alias=self.config.channel_alias,
+            )
+            device_type = self.control.ensure_device_type(base.workspace.id)
+            persistence = self.rules.ensure_senml_persistence(
+                base.workspace.id,
+                base.channel.id,
+                name=self.config.persistence_rule_name,
+            )
+            self.base = base
+            self.device_type = device_type
+            self.persistence_rule = persistence
 
     def _ensure_bootstrapped(self) -> tuple[BaseResources, DeviceTypeRef]:
-        if self.base is None or self.device_type is None:
-            self.bootstrap()
+        self.bootstrap()
         assert self.base is not None
         assert self.device_type is not None
         return self.base, self.device_type
 
     def process(self, raw: RawEvent) -> ProcessResult:
-        base, device_type = self._ensure_bootstrapped()
         outcome = self.pipeline.process(raw)
         parsed = outcome.event
 
-        device = self._devices.get(parsed.external_device_id)
-        cache_source = "memory" if device is not None else "remote"
+        with self._control_lock:
+            base, device_type = self._ensure_bootstrapped()
+            device = self._devices.get(parsed.external_device_id)
+            cache_source = "memory" if device is not None else "remote"
 
-        if device is None and self.state_store is not None:
-            device = self.state_store.get_device(
-                base.workspace.id,
-                base.channel.id,
-                parsed.external_device_id,
-            )
-            if device is not None:
-                cache_source = "persistent"
-                self._devices[parsed.external_device_id] = device
-
-        if device is None:
-            device = self.control.ensure_device(
-                base.workspace.id,
-                base.channel.id,
-                parsed.external_device_id,
-                device_type=device_type,
-                name=parsed.external_device_id,
-                alias=_safe_alias(parsed.external_device_id),
-                attributes=_device_attributes(parsed),
-            )
-            self._devices[parsed.external_device_id] = device
-            if self.state_store is not None:
-                self.state_store.upsert_device(
-                    device,
-                    channel_id=base.channel.id,
-                    seen_at=raw.received_at,
+            if device is None and self.state_store is not None:
+                device = self.state_store.get_device(
+                    base.workspace.id,
+                    base.channel.id,
+                    parsed.external_device_id,
                 )
+                if device is not None:
+                    cache_source = "persistent"
+                    self._devices[parsed.external_device_id] = device
+
+            if device is None:
+                device = self.control.ensure_device(
+                    base.workspace.id,
+                    base.channel.id,
+                    parsed.external_device_id,
+                    device_type=device_type,
+                    name=parsed.external_device_id,
+                    alias=_safe_alias(parsed.external_device_id),
+                    attributes=_device_attributes(parsed),
+                )
+                self._devices[parsed.external_device_id] = device
+                if self.state_store is not None:
+                    self.state_store.upsert_device(
+                        device,
+                        channel_id=base.channel.id,
+                        seen_at=raw.received_at,
+                    )
 
         senml = tuple(event_to_senml(parsed))
         published = self.publisher.publish(
