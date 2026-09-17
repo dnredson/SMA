@@ -295,7 +295,7 @@ class LifecycleSmarterAdapterRuntime(SmarterAdapterRuntime):
         with self._control_lock:
             return self._devices.pop(str(external_id), None) is not None
 
-    def _record_catalog_observation(self, base, parsed, raw) -> None:
+    def _assert_node_active(self, base, parsed) -> None:
         store = self.state_store
         node_id = str(parsed.metadata.get("node_id") or "").strip()
         checker = getattr(store, "is_node_decommissioned", None) if store is not None else None
@@ -308,7 +308,18 @@ class LifecycleSmarterAdapterRuntime(SmarterAdapterRuntime):
                 node_id=node_id,
                 external_id=parsed.external_device_id,
             )
+
+    def _record_catalog_observation(self, base, parsed, raw) -> None:
+        self._assert_node_active(base, parsed)
         super()._record_catalog_observation(base, parsed, raw)
+
+    def _remote_device(self, base, device_type, parsed, raw):
+        # Re-check here as well: a message may have passed the initial lifecycle
+        # gate immediately before an administrator decommissioned the node. If
+        # its publish then receives 403 and attempts reconciliation, this guard
+        # prevents recreating the revoked publish policy.
+        self._assert_node_active(base, parsed)
+        return super()._remote_device(base, device_type, parsed, raw)
 
 
 @dataclass
