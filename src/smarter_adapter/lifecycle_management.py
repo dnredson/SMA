@@ -17,7 +17,7 @@ class _LifecycleHandler(_Handler):
         return self.server.lifecycle_controller  # type: ignore[attr-defined]
 
     @property
-    def reconciler(self) -> ControlPlaneReconciler:
+    def reconciler(self) -> Optional[ControlPlaneReconciler]:
         return self.server.reconciler  # type: ignore[attr-defined]
 
     @staticmethod
@@ -108,7 +108,7 @@ class _LifecycleHandler(_Handler):
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/")
 
-        if path == "/api/v2/reconcile":
+        if path == "/api/v2/reconcile" and self.reconciler is not None:
             if not self._authorized():
                 self._error(401, "unauthorized")
                 return
@@ -212,12 +212,25 @@ class LifecycleManagementServer(ThreadingHTTPServer):
         self.catalog_manager = catalog_manager
         self.api_token = api_token
         self.lifecycle_controller = lifecycle_controller
-        self.reconciler = reconciler or ControlPlaneReconciler(
-            runtime=runtime,
-            store=store,
-            catalog=catalog_manager,
-            atom=lifecycle_controller.atom,
-        )
+
+        # Backward-compatible construction: older component tests and custom
+        # embeddings can use lifecycle management without exposing an Atom
+        # client on the controller. The production runner does expose it, so
+        # the richer drift reconciler is created automatically there.
+        if reconciler is not None:
+            self.reconciler = reconciler
+        else:
+            atom = getattr(lifecycle_controller, "atom", None)
+            self.reconciler = (
+                ControlPlaneReconciler(
+                    runtime=runtime,
+                    store=store,
+                    catalog=catalog_manager,
+                    atom=atom,
+                )
+                if atom is not None
+                else None
+            )
 
 
 def start_lifecycle_management_server(
