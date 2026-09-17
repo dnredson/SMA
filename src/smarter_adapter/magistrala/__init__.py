@@ -10,6 +10,7 @@ from .control_plane import (
     ManagedDeviceResources,
     WorkspaceRef,
 )
+from .reader import MessagesPage, ReaderError, TimescaleReaderClient
 from .rules import PersistenceRuleRef, RulesClient, RulesError
 
 __all__ = [
@@ -22,9 +23,12 @@ __all__ = [
     "DeviceRef",
     "DeviceTypeRef",
     "ManagedDeviceResources",
+    "MessagesPage",
     "PersistenceRuleRef",
+    "ReaderError",
     "RulesClient",
     "RulesError",
+    "TimescaleReaderClient",
     "TokenManager",
     "WorkspaceRef",
 ]
