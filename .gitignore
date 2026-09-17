@@ -13,6 +13,9 @@ __pycache__/
 adapter.key
 entities.json
 config.local.toml
+.state/
+*.sqlite
+*.sqlite3
 
 # Node/Build (se houver)
 node_modules/
