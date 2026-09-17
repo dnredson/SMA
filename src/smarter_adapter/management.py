@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -9,6 +10,7 @@ from typing import Any, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .magistrala.reader import ReaderError, TimescaleReaderClient
+from .presence import DevicePresencePolicy
 from .reliability import DeliveryQueueStore
 from .runtime import SmarterAdapterRuntime
 from .service import SmarterAdapterService
@@ -37,6 +39,10 @@ class _Handler(BaseHTTPRequestHandler):
     @property
     def reader(self) -> Optional[TimescaleReaderClient]:
         return self.server.reader  # type: ignore[attr-defined]
+
+    @property
+    def presence(self) -> DevicePresencePolicy:
+        return self.server.presence_policy  # type: ignore[attr-defined]
 
     def _authorized(self) -> bool:
         expected = self.server.api_token  # type: ignore[attr-defined]
@@ -96,6 +102,32 @@ class _Handler(BaseHTTPRequestHandler):
             "inputs": inputs,
         }
 
+    def _managed_devices(self, *, limit: int, now: Optional[float] = None) -> list[dict]:
+        base = self.runtime.base
+        workspace_id = base.workspace.id if base else ""
+        channel_id = base.channel.id if base else ""
+        rows = self.store.list_devices(  # type: ignore[attr-defined]
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            limit=limit,
+        )
+        current = time.time() if now is None else float(now)
+        return [self.presence.decorate(item, now=current) for item in rows]
+
+    def _presence_summary(self) -> dict:
+        items = self._managed_devices(limit=100000)
+        counts = {"online": 0, "stale": 0, "offline": 0}
+        for item in items:
+            state = str(item.get("operational_status") or "offline")
+            if state in counts:
+                counts[state] += 1
+        return {
+            "total": len(items),
+            **counts,
+            "stale_after_seconds": self.presence.stale_after_seconds,
+            "offline_after_seconds": self.presence.offline_after_seconds,
+        }
+
     def _status_payload(self) -> dict:
         base = self.runtime.base
         rule = self.runtime.persistence_rule
@@ -106,6 +138,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "retry": self.store.count_retries(),
                 "dlq": self.store.count_dlq(),
             },
+            "devices": self._presence_summary(),
             "runtime": {
                 "workspace_id": base.workspace.id if base else None,
                 "channel_id": base.channel.id if base else None,
@@ -158,9 +191,6 @@ class _Handler(BaseHTTPRequestHandler):
         direction = str((query.get("dir") or ["desc"])[0])
         name = str((query.get("name") or [""])[0])
 
-        # The management store deliberately exposes an exact lookup so this
-        # endpoint can only read telemetry for devices managed in the current
-        # workspace/channel.
         device = self.store.find_device(  # type: ignore[attr-defined]
             base.workspace.id,
             base.channel.id,
@@ -183,6 +213,11 @@ class _Handler(BaseHTTPRequestHandler):
         payload = page.as_dict()
         payload["external_id"] = external_id
         payload["atom_device_id"] = device["atom_device_id"]
+        payload["operational_status"] = self.presence.classify(float(device["last_seen"]))
+        payload["last_seen"] = device["last_seen"]
+        payload["last_seen_age_seconds"] = round(
+            self.presence.age_seconds(float(device["last_seen"])), 3
+        )
         self._send(200, payload)
         return True
 
@@ -213,13 +248,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, self._status_payload())
                 return
             if path == "/api/v2/devices":
-                workspace_id = self.runtime.base.workspace.id if self.runtime.base else ""
-                channel_id = self.runtime.base.channel.id if self.runtime.base else ""
-                items = self.store.list_devices(  # type: ignore[attr-defined]
-                    workspace_id=workspace_id,
-                    channel_id=channel_id,
-                    limit=limit,
-                )
+                items = self._managed_devices(limit=limit)
                 self._send(200, {"total": len(items), "items": items})
                 return
             if path == "/api/v2/retry":
@@ -304,6 +333,7 @@ class ManagementServer(ThreadingHTTPServer):
         runtime: SmarterAdapterRuntime,
         store: DeliveryQueueStore,
         reader: Optional[TimescaleReaderClient] = None,
+        presence_policy: DevicePresencePolicy = DevicePresencePolicy(),
         api_token: str = "",
     ) -> None:
         super().__init__(address, _Handler)
@@ -311,6 +341,7 @@ class ManagementServer(ThreadingHTTPServer):
         self.runtime = runtime
         self.store = store
         self.reader = reader
+        self.presence_policy = presence_policy
         self.api_token = api_token
 
 
@@ -322,6 +353,7 @@ def start_management_server(
     runtime: SmarterAdapterRuntime,
     store: DeliveryQueueStore,
     reader: Optional[TimescaleReaderClient] = None,
+    presence_policy: DevicePresencePolicy = DevicePresencePolicy(),
     api_token: str = "",
 ) -> ManagementServer:
     server = ManagementServer(
@@ -330,6 +362,7 @@ def start_management_server(
         runtime=runtime,
         store=store,
         reader=reader,
+        presence_policy=presence_policy,
         api_token=api_token,
     )
     thread = Thread(target=server.serve_forever, name="smarter-adapter-management", daemon=True)
