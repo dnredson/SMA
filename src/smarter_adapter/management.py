@@ -114,8 +114,9 @@ class _Handler(BaseHTTPRequestHandler):
         current = time.time() if now is None else float(now)
         return [self.presence.decorate(item, now=current) for item in rows]
 
-    def _presence_summary(self) -> dict:
-        items = self._managed_devices(limit=100000)
+    def _presence_summary(self, items: Optional[list[dict]] = None) -> dict:
+        if items is None:
+            items = self._managed_devices(limit=100000)
         counts = {"online": 0, "stale": 0, "offline": 0}
         for item in items:
             state = str(item.get("operational_status") or "offline")
@@ -128,17 +129,29 @@ class _Handler(BaseHTTPRequestHandler):
             "offline_after_seconds": self.presence.offline_after_seconds,
         }
 
+    @staticmethod
+    def _quality_summary(items: list[dict]) -> dict:
+        counts = {"valid": 0, "degraded": 0, "invalid": 0, "unknown": 0}
+        for item in items:
+            state = str(item.get("data_quality") or "unknown")
+            if state not in counts:
+                state = "unknown"
+            counts[state] += 1
+        return {"total": len(items), **counts}
+
     def _status_payload(self) -> dict:
         base = self.runtime.base
         rule = self.runtime.persistence_rule
         device_type = self.runtime.device_type
+        devices = self._managed_devices(limit=100000)
         return {
             "service": asdict(self.service.stats),
             "queues": {
                 "retry": self.store.count_retries(),
                 "dlq": self.store.count_dlq(),
             },
-            "devices": self._presence_summary(),
+            "devices": self._presence_summary(devices),
+            "quality": self._quality_summary(devices),
             "runtime": {
                 "workspace_id": base.workspace.id if base else None,
                 "channel_id": base.channel.id if base else None,
@@ -218,6 +231,10 @@ class _Handler(BaseHTTPRequestHandler):
         payload["last_seen_age_seconds"] = round(
             self.presence.age_seconds(float(device["last_seen"])), 3
         )
+        payload["data_quality"] = device.get("data_quality", "unknown")
+        payload["invalid_fields"] = device.get("invalid_fields", [])
+        payload["quality_evaluated_at"] = device.get("quality_evaluated_at")
+        payload["quality_source_received_at"] = device.get("quality_source_received_at")
         self._send(200, payload)
         return True
 
