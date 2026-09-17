@@ -50,6 +50,36 @@ class _LifecycleHandler(_Handler):
             raise ValueError("JSON request body must be an object")
         return value
 
+    def _catalog_summary(self) -> dict:
+        catalog = self.catalog
+        if catalog is None:
+            return {
+                "configured": False,
+                "source": "none",
+                "writable": False,
+                "total": 0,
+                "planned": 0,
+                "observed": 0,
+                "managed": 0,
+                "decommissioned": 0,
+                "active": 0,
+            }
+        public_payload = getattr(catalog, "public_payload", None)
+        if not callable(public_payload):
+            return super()._catalog_summary()
+        payload = public_payload()
+        return {
+            "configured": True,
+            "source": payload.get("source", ""),
+            "writable": bool(payload.get("writable", False)),
+            "total": int(payload.get("total", 0)),
+            "planned": int(payload.get("planned", 0)),
+            "observed": int(payload.get("observed", 0)),
+            "managed": int(payload.get("managed", 0)),
+            "decommissioned": int(payload.get("decommissioned", 0)),
+            "active": int(payload.get("active", payload.get("total", 0))),
+        }
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
