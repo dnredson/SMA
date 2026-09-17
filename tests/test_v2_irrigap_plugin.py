@@ -8,11 +8,22 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from smarter_adapter.models import RawEvent
 from smarter_adapter.parsers import IrrigapChirpStackParser
+from smarter_adapter.pipeline import ParsePipeline
+from smarter_adapter.plugins import ParserRegistry
 
 
 class IrrigapChirpStackPluginTests(unittest.TestCase):
-    def _event(self, *, node_id="3303", f_port=31, device_name="greenstick-3303"):
-        ul = f"S|2509170900|I|{node_id}|M1|1261|T1|22.1|C1|640"
+    def _event(
+        self,
+        *,
+        node_id="3303",
+        f_port=31,
+        device_name="greenstick-3303",
+        moisture=1261,
+        temperature=22.1,
+        ec=640,
+    ):
+        ul = f"S|2509170900|I|{node_id}|M1|{moisture}|T1|{temperature}|C1|{ec}"
         envelope = {
             "data": base64.b64encode(ul.encode()).decode(),
             "time": "2026-09-17T12:00:00Z",
@@ -74,6 +85,48 @@ class IrrigapChirpStackPluginTests(unittest.TestCase):
         self.assertEqual(parsed.metadata["sensor"], "irrigap")
         self.assertNotIn("location", parsed.metadata)
         self.assertNotIn("depth", parsed.metadata)
+
+    def test_full_minus_one_sentinel_becomes_quality_diagnostics(self):
+        pipeline = ParsePipeline(ParserRegistry([IrrigapChirpStackParser()]))
+        outcome = pipeline.process(
+            self._event(
+                node_id="2313",
+                device_name="teros12-sector1.3",
+                moisture=-1,
+                temperature=-1,
+                ec=-1,
+            )
+        )
+        values = {measurement.name: measurement.value for measurement in outcome.event.measurements}
+
+        self.assertEqual(outcome.quality_status, "invalid")
+        self.assertNotIn("soil.moisture", values)
+        self.assertNotIn("soil.raw.moisture_m1", values)
+        self.assertNotIn("soil.temperature", values)
+        self.assertNotIn("soil.electrical_conductivity", values)
+        self.assertNotIn("soil.raw.ec_c1", values)
+        self.assertEqual(values["sensor.data_quality"], "invalid")
+        self.assertEqual(
+            values["sensor.invalid_fields"],
+            "moisture,temperature,electrical_conductivity",
+        )
+
+    def test_minus_one_temperature_alone_is_not_assumed_to_be_sentinel(self):
+        pipeline = ParsePipeline(ParserRegistry([IrrigapChirpStackParser()]))
+        outcome = pipeline.process(
+            self._event(
+                node_id="2311",
+                device_name="teros12-cold-test",
+                moisture=2355.1,
+                temperature=-1,
+                ec=67,
+            )
+        )
+        values = {measurement.name: measurement.value for measurement in outcome.event.measurements}
+
+        self.assertEqual(outcome.quality_status, "valid")
+        self.assertEqual(values["soil.temperature"], -1.0)
+        self.assertNotIn("sensor.data_quality", values)
 
 
 if __name__ == "__main__":
