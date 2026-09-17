@@ -282,7 +282,18 @@ def main() -> int:
             "binding_observed_at": decorated.get("binding_observed_at"),
         }
 
+    def catalog_observation(node_id: str):
+        base = runtime.base
+        if base is None:
+            return None
+        return state_store.find_latest_catalog_observation_by_node(
+            base.workspace.id,
+            base.channel.id,
+            node_id,
+        )
+
     catalog_manager.set_binding_resolver(catalog_binding)
+    catalog_manager.set_observation_resolver(catalog_observation)
 
     service = SmarterAdapterService(
         runtime,
