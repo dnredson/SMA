@@ -96,6 +96,7 @@ class SQLiteManagementStore(SQLiteStateStore):
         now = time.time()
         evaluated = float(now if evaluated_at is None else evaluated_at)
         received = float(evaluated if source_received_at is None else source_received_at)
+        encoded_fields = json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -104,17 +105,26 @@ class SQLiteManagementStore(SQLiteStateStore):
                     invalid_fields_json, evaluated_at, source_received_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id, channel_id, external_id) DO UPDATE SET
-                    quality_status = excluded.quality_status,
-                    invalid_fields_json = excluded.invalid_fields_json,
-                    evaluated_at = excluded.evaluated_at,
-                    source_received_at = excluded.source_received_at
+                    quality_status = CASE
+                        WHEN excluded.source_received_at >= managed_device_quality.source_received_at
+                        THEN excluded.quality_status ELSE managed_device_quality.quality_status END,
+                    invalid_fields_json = CASE
+                        WHEN excluded.source_received_at >= managed_device_quality.source_received_at
+                        THEN excluded.invalid_fields_json ELSE managed_device_quality.invalid_fields_json END,
+                    evaluated_at = CASE
+                        WHEN excluded.source_received_at >= managed_device_quality.source_received_at
+                        THEN excluded.evaluated_at ELSE managed_device_quality.evaluated_at END,
+                    source_received_at = MAX(
+                        managed_device_quality.source_received_at,
+                        excluded.source_received_at
+                    )
                 """,
                 (
                     str(workspace_id),
                     str(channel_id),
                     str(external_id),
                     status,
-                    json.dumps(fields, ensure_ascii=False, separators=(",", ":")),
+                    encoded_fields,
                     evaluated,
                     received,
                 ),
