@@ -164,10 +164,19 @@ def main() -> int:
     )
 
     def on_result(result):
+        issue_fields = []
+        for issue in result.quality_issues:
+            field = issue.source_field or issue.measurement
+            if field not in issue_fields:
+                issue_fields.append(field)
+        quality_detail = ""
+        if issue_fields:
+            quality_detail = " invalid=" + ",".join(issue_fields)
         print(
             "OK "
             f"parser={result.parser} external={result.parsed_event.external_device_id} "
             f"device={result.device.id} cache={result.device_cache_source} "
+            f"quality={result.quality_status}{quality_detail} "
             f"records={len(result.senml)} http={result.publish.status}",
             flush=True,
         )
