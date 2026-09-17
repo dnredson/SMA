@@ -10,6 +10,7 @@ from typing import Any, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .magistrala.reader import ReaderError, TimescaleReaderClient
+from .metrics import render_prometheus_metrics
 from .presence import DevicePresencePolicy
 from .reliability import DeliveryQueueStore
 from .runtime import SmarterAdapterRuntime
@@ -55,6 +56,21 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         if value is not None:
             self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def _send_text(
+        self,
+        status: int,
+        value: str,
+        *,
+        content_type: str = "text/plain; charset=utf-8",
+    ) -> None:
+        body = str(value).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if body:
@@ -174,6 +190,10 @@ class _Handler(BaseHTTPRequestHandler):
             ],
         }
 
+    def _metrics_text(self) -> str:
+        ready, _ = self._ready_payload()
+        return render_prometheus_metrics(self._status_payload(), ready=ready)
+
     @staticmethod
     def _device_messages_external_id(path: str) -> Optional[str]:
         prefix = "/api/v2/devices/"
@@ -255,6 +275,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            if path == "/metrics":
+                self._send_text(
+                    200,
+                    self._metrics_text(),
+                    content_type="text/plain; version=0.0.4; charset=utf-8",
+                )
+                return
+
             if self._device_messages(parsed, path):
                 return
 
