@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .device_lifecycle import DecommissionedEventSuppressed
-from .runtime import ProcessResult
+from .reliability import is_retryable_failure, retry_deadline
 from .service import SmarterAdapterService
 
 
@@ -76,14 +76,12 @@ class LifecycleSmarterAdapterService(SmarterAdapterService):
             return
         except Exception as exc:
             new_attempts = int(item.attempts) + 1
-            from .reliability import is_retryable_failure, retry_deadline
-
             if (not is_retryable_failure(exc)) or new_attempts >= self.retry_policy.max_attempts:
                 self.reliability_store.reschedule_retry(
                     item.id,
                     exc,
                     attempts=new_attempts,
-                    next_attempt_at=__import__("time").time(),
+                    next_attempt_at=time.time(),
                 )
                 self.reliability_store.move_retry_to_dlq(item.id, exc)
                 with self._lock:
