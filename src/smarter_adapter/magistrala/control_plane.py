@@ -95,6 +95,14 @@ class AtomControlPlaneAPI(Protocol):
         attributes: Optional[Dict[str, Any]] = None,
     ): ...
 
+    def update_device_profile(
+        self,
+        device_id: str,
+        *,
+        profile_id: str,
+        profile_version_id: str,
+    ): ...
+
     def ensure_publish_policy(
         self,
         tenant_id: str,
@@ -148,6 +156,7 @@ class DeviceRef:
     profile_version_id: str
     created: bool = False
     publish_policy_created: bool = False
+    profile_migrated: bool = False
 
 
 @dataclass(frozen=True)
@@ -335,6 +344,54 @@ class ControlPlane:
             version_created=version_created,
         )
 
+    def _update_device_profile(
+        self,
+        device_id: str,
+        device_type: DeviceTypeRef,
+    ) -> Dict[str, Any]:
+        """Rebind one SMA-owned Atom entity without changing its identity.
+
+        ``LifecycleAtomClient`` currently inherits the base Atom client, whose
+        public surface predates profile rebinding. Prefer a public helper when
+        available and otherwise use Atom's documented ``updateEntity`` GraphQL
+        mutation. The latter is a partial update: omitted attributes remain
+        unchanged.
+        """
+        updater = getattr(self.atom, "update_device_profile", None)
+        if callable(updater):
+            result = updater(
+                device_id,
+                profile_id=device_type.id,
+                profile_version_id=device_type.version_id,
+            )
+            return dict(result or {})
+
+        graphql = getattr(self.atom, "_graphql", None)
+        if not callable(graphql):
+            raise RuntimeError("Atom client cannot update a device profile in place")
+        fields = (
+            "id kind profileId profileVersionId name alias externalId tenantId "
+            "objectGroupIds status attributes createdAt updatedAt"
+        )
+        mutation = f"""
+        mutation UpdateDeviceProfile($id: ID!, $input: UpdateEntityInput!) {{
+          updateEntity(id: $id, input: $input) {{ {fields} }}
+        }}
+        """
+        return dict(
+            graphql(
+                mutation,
+                {
+                    "id": device_id,
+                    "input": {
+                        "profileId": device_type.id,
+                        "profileVersionId": device_type.version_id,
+                    },
+                },
+            ).get("updateEntity")
+            or {}
+        )
+
     def ensure_device(
         self,
         workspace_id: str,
@@ -345,6 +402,7 @@ class ControlPlane:
         name: str = "",
         alias: str = "",
         attributes: Optional[Dict[str, Any]] = None,
+        allow_profile_migration: bool = False,
     ) -> DeviceRef:
         external_id = str(external_id or "").strip()
         if not external_id:
@@ -368,14 +426,33 @@ class ControlPlane:
             )
 
         created = False
+        profile_migrated = False
         if exact:
             device = exact[0]
             current_profile = str(device.get("profileId") or "")
-            if current_profile and current_profile != device_type.id:
-                raise RuntimeError(
-                    f"device {external_id!r} is bound to unexpected profile "
-                    f"{current_profile!r}; expected {device_type.id!r}"
+            current_version = str(device.get("profileVersionId") or "")
+            profile_mismatch = bool(
+                (current_profile and current_profile != device_type.id)
+                or (current_version and current_version != device_type.version_id)
+            )
+            if profile_mismatch:
+                remote_attributes = device.get("attributes") or {}
+                sma_owned = (
+                    isinstance(remote_attributes, dict)
+                    and str(remote_attributes.get("managed_by") or "") == "smarter-adapter"
                 )
+                if not allow_profile_migration or not sma_owned:
+                    raise RuntimeError(
+                        f"device {external_id!r} is bound to unexpected profile/version "
+                        f"{current_profile!r}/{current_version!r}; expected "
+                        f"{device_type.id!r}/{device_type.version_id!r}"
+                    )
+                device = self._update_device_profile(str(device.get("id") or ""), device_type)
+                if not device:
+                    raise RuntimeError(
+                        f"Atom did not return device {external_id!r} after profile migration"
+                    )
+                profile_migrated = True
         else:
             merged_attributes: Dict[str, Any] = {
                 "managed_by": "smarter-adapter",
@@ -413,6 +490,7 @@ class ControlPlane:
             ),
             created=created,
             publish_policy_created=policy_created,
+            profile_migrated=profile_migrated,
         )
 
     def ensure_managed_device(
