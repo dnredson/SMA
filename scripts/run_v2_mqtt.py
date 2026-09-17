@@ -18,6 +18,12 @@ from smarter_adapter.device_lifecycle import (
     LifecycleSmarterAdapterRuntime,
 )
 from smarter_adapter.inputs import MQTTInputConfig
+from smarter_adapter.intelligence import (
+    LLMContextBuilder,
+    MqttJsonPublisher,
+    ThresholdPolicy,
+    alerts_for_result,
+)
 from smarter_adapter.irrigap_config import load_irrigap_catalog
 from smarter_adapter.legacy_parser import LegacySensorParser
 from smarter_adapter.lifecycle_management import start_lifecycle_management_server
@@ -184,6 +190,34 @@ def main() -> int:
         state_store=state_store,
     )
 
+    # Intelligence side channels are deliberately outside the primary delivery
+    # path: an alert/LLM broker outage must never trigger telemetry retries.
+    try:
+        threshold_policy = ThresholdPolicy.from_json(env("SMA_QUALITY_THRESHOLDS_JSON"))
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"ERROR: invalid SMA_QUALITY_THRESHOLDS_JSON: {exc}", file=sys.stderr)
+        return 2
+    llm_context_builder = LLMContextBuilder()
+
+    alerts_address = env("SMA_ALERTS_MQTT_ADDRESS", env("ALERTS_MQTT_ADDRESS"))
+    alert_publisher = MqttJsonPublisher(
+        address=alerts_address,
+        topic_base=env("SMA_ALERTS_TOPIC_BASE", "adapter/alerts"),
+        qos=int(env("SMA_ALERTS_QOS", "0")),
+        username=env("SMA_ALERTS_MQTT_USERNAME"),
+        password=env("SMA_ALERTS_MQTT_PASSWORD"),
+        client_id=env("SMA_ALERTS_CLIENT_ID", "smarter-adapter-alerts-v2"),
+    )
+    context_address = env("SMA_LLM_CONTEXT_MQTT_ADDRESS")
+    context_publisher = MqttJsonPublisher(
+        address=context_address,
+        topic_base=env("SMA_LLM_CONTEXT_TOPIC_BASE", "adapter/llm-context"),
+        qos=int(env("SMA_LLM_CONTEXT_QOS", "0")),
+        username=env("SMA_LLM_CONTEXT_MQTT_USERNAME"),
+        password=env("SMA_LLM_CONTEXT_MQTT_PASSWORD"),
+        client_id=env("SMA_LLM_CONTEXT_CLIENT_ID", "smarter-adapter-llm-context-v2"),
+    )
+
     def on_result(result):
         parsed = result.parsed_event
         issue_fields = []
@@ -194,11 +228,39 @@ def main() -> int:
         quality_detail = ""
         if issue_fields:
             quality_detail = " invalid=" + ",".join(issue_fields)
+
+        adapter_alerts = alerts_for_result(result, threshold_policy)
+        llm_context = llm_context_builder.build(result, alerts=adapter_alerts)
+
+        if alert_publisher.enabled:
+            for alert in adapter_alerts:
+                ok, detail = alert_publisher.publish(alert)
+                if not ok:
+                    print(
+                        f"WARN alert-mqtt external={parsed.external_device_id} {detail}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+        if context_publisher.enabled:
+            ok, detail = context_publisher.publish(
+                llm_context,
+                suffix=parsed.external_device_id,
+            )
+            if not ok:
+                print(
+                    f"WARN llm-context-mqtt external={parsed.external_device_id} {detail}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
         print(
             "OK "
             f"parser={result.parser} external={parsed.external_device_id} "
             f"device={result.device.id} cache={result.device_cache_source} "
+            f"profile={result.profile_key} "
             f"quality={result.quality_status}{quality_detail} "
+            f"alerts={len(adapter_alerts)} context=ready "
             f"records={len(result.senml)} http={result.publish.status}",
             flush=True,
         )
@@ -241,6 +303,8 @@ def main() -> int:
         return {
             "external_id": decorated["external_id"],
             "atom_device_id": decorated["atom_device_id"],
+            "profile_id": decorated.get("profile_id"),
+            "profile_version_id": decorated.get("profile_version_id"),
             "operational_status": decorated["operational_status"],
             "last_seen": decorated["last_seen"],
             "last_seen_age_seconds": decorated["last_seen_age_seconds"],
@@ -310,6 +374,21 @@ def main() -> int:
             f"catalog={catalog_manager.source} nodes={len(catalog_manager.list_nodes())} "
             f"writable={str(catalog_manager.writable).lower()}"
         )
+        print(
+            "Profiles:  generic fallback; typed="
+            + ",".join(runtime.profile_registry.families)
+            + " migration=in-place"
+        )
+        print(
+            "Alerts:    "
+            f"mqtt={'enabled' if alert_publisher.enabled else 'disabled'} "
+            f"topic={alert_publisher.topic_base} rules={len(threshold_policy.rules)}"
+        )
+        print(
+            "LLM ctx:   builder=enabled "
+            f"mqtt={'enabled' if context_publisher.enabled else 'disabled'} "
+            f"topic={context_publisher.topic_base}/<external_id>"
+        )
         print(f"Atom:      {atom_url}")
         print(f"Publish:   {publish_url}")
         print(f"Rules:     {rules_url}")
@@ -354,6 +433,8 @@ def main() -> int:
             management.shutdown()
             management.server_close()
         service.stop()
+        alert_publisher.close()
+        context_publisher.close()
         stats = service.stats
         pending_retry = state_store.count_retries()
         pending_dlq = state_store.count_dlq()
