@@ -112,6 +112,16 @@ class AtomClient:
     resource_fields = (
         "id kind name alias tenantId ownerId objectGroupIds attributes createdAt updatedAt"
     )
+    device_type_fields = (
+        "id tenantId key name: displayName description status createdAt updatedAt"
+    )
+    device_type_version_fields = (
+        "id profileId version jsonSchema uiSchema status createdAt"
+    )
+    entity_fields = (
+        "id kind profileId profileVersionId name alias externalId tenantId "
+        "objectGroupIds status attributes createdAt updatedAt"
+    )
 
     _login_mutation = """
     mutation Login($input: LoginInput!) {
@@ -301,6 +311,329 @@ class AtomClient:
         if attributes:
             inp["attributes"] = attributes
         return dict(self._graphql(mutation, {"input": inp}).get("createResource") or {})
+
+    def list_device_types(
+        self,
+        tenant_id: str,
+        *,
+        status: str = "",
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """List Atom profiles that Magistrala exposes as device types."""
+        query = f"""
+        query DeviceTypes(
+          $objectKind: String,
+          $kind: String,
+          $tenantId: ID,
+          $status: String,
+          $limit: Int,
+          $offset: Int
+        ) {{
+          profiles(
+            objectKind: $objectKind,
+            kind: $kind,
+            tenantId: $tenantId,
+            status: $status,
+            limit: $limit,
+            offset: $offset
+          ) {{
+            total
+            items {{ {self.device_type_fields} }}
+          }}
+        }}
+        """
+        variables: Dict[str, Any] = {
+            "objectKind": "entity",
+            "kind": "device",
+            "tenantId": tenant_id,
+        }
+        if status:
+            variables["status"] = status
+        return self._paged(query, "profiles", variables, limit)
+
+    def create_device_type(
+        self,
+        tenant_id: str,
+        key: str,
+        name: str,
+        *,
+        description: str = "",
+        status: str = "active",
+    ) -> Dict[str, Any]:
+        mutation = f"""
+        mutation CreateDeviceType($input: CreateProfileInput!) {{
+          createProfile(input: $input) {{ {self.device_type_fields} }}
+        }}
+        """
+        inp: Dict[str, Any] = {
+            "tenantId": tenant_id,
+            "objectKind": "entity",
+            "kind": "device",
+            "key": key,
+            "displayName": name,
+            "status": status,
+        }
+        if description:
+            inp["description"] = description
+        return dict(self._graphql(mutation, {"input": inp}).get("createProfile") or {})
+
+    def list_device_type_versions(self, profile_id: str) -> List[Dict[str, Any]]:
+        query = f"""
+        query DeviceTypeVersions($profileId: ID!) {{
+          profileVersions(profileId: $profileId) {{
+            {self.device_type_version_fields}
+          }}
+        }}
+        """
+        versions = list(
+            self._graphql(query, {"profileId": profile_id}).get("profileVersions") or []
+        )
+        versions.sort(key=lambda item: int(item.get("version") or 0))
+        return versions
+
+    def create_device_type_version(
+        self,
+        profile_id: str,
+        *,
+        version: int,
+        json_schema: Dict[str, Any],
+        ui_schema: Optional[Dict[str, Any]] = None,
+        status: str = "active",
+    ) -> Dict[str, Any]:
+        mutation = f"""
+        mutation CreateDeviceTypeVersion(
+          $profileId: ID!,
+          $input: CreateProfileVersionInput!
+        ) {{
+          createProfileVersion(profileId: $profileId, input: $input) {{
+            {self.device_type_version_fields}
+          }}
+        }}
+        """
+        inp: Dict[str, Any] = {
+            "version": int(version),
+            "jsonSchema": json_schema,
+            "status": status,
+        }
+        if ui_schema is not None:
+            inp["uiSchema"] = ui_schema
+        return dict(
+            self._graphql(
+                mutation,
+                {"profileId": profile_id, "input": inp},
+            ).get("createProfileVersion")
+            or {}
+        )
+
+    def list_devices(
+        self,
+        tenant_id: str,
+        *,
+        external_id: str = "",
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        query = f"""
+        query Devices(
+          $tenantId: ID,
+          $kind: String,
+          $externalId: String,
+          $limit: Int,
+          $offset: Int
+        ) {{
+          entities(
+            tenantId: $tenantId,
+            kind: $kind,
+            externalId: $externalId,
+            limit: $limit,
+            offset: $offset
+          ) {{
+            total
+            items {{ {self.entity_fields} }}
+          }}
+        }}
+        """
+        variables: Dict[str, Any] = {
+            "tenantId": tenant_id,
+            "kind": "device",
+        }
+        if external_id:
+            variables["externalId"] = external_id
+        return self._paged(query, "entities", variables, limit)
+
+    def create_device(
+        self,
+        tenant_id: str,
+        external_id: str,
+        *,
+        profile_id: str,
+        profile_version_id: str = "",
+        name: str = "",
+        alias: str = "",
+        attributes: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        mutation = f"""
+        mutation CreateDevice($input: CreateEntityInput!) {{
+          createEntity(input: $input) {{ {self.entity_fields} }}
+        }}
+        """
+        inp: Dict[str, Any] = {
+            "tenantId": tenant_id,
+            "kind": "device",
+            "profileId": profile_id,
+            "name": name or external_id,
+            "externalId": external_id,
+            "attributes": attributes or {},
+        }
+        if profile_version_id:
+            inp["profileVersionId"] = profile_version_id
+        if alias:
+            inp["alias"] = alias
+        return dict(self._graphql(mutation, {"input": inp}).get("createEntity") or {})
+
+    def capability_id(self, action_name: str) -> str:
+        query = """
+        query Actions($limit: Int!, $offset: Int!) {
+          actions(limit: $limit, offset: $offset) {
+            total
+            items { id name }
+          }
+        }
+        """
+        offset = 0
+        while True:
+            page = self._graphql(query, {"limit": 100, "offset": offset}).get("actions") or {}
+            items = list(page.get("items") or [])
+            for item in items:
+                if str(item.get("name") or "") == action_name:
+                    capability_id = str(item.get("id") or "")
+                    if capability_id:
+                        return capability_id
+            total = int(page.get("total") or 0)
+            if not items or offset + len(items) >= total:
+                break
+            offset += len(items)
+        raise AtomError(f"Atom capability not found: {action_name}")
+
+    def ensure_publish_policy(
+        self,
+        tenant_id: str,
+        device_id: str,
+        channel_id: str,
+    ) -> bool:
+        """Ensure a device has direct `publish` permission on a channel.
+
+        Returns True only when a new direct policy was created.
+        """
+        query = """
+        query DevicePolicies(
+          $tenantId: ID,
+          $subjectKind: SubjectKind,
+          $subjectId: ID,
+          $limit: Int,
+          $offset: Int
+        ) {
+          directPolicies(
+            tenantId: $tenantId,
+            subjectKind: $subjectKind,
+            subjectId: $subjectId,
+            limit: $limit,
+            offset: $offset
+          ) {
+            total
+            items {
+              id
+              subjectKind
+              subjectId
+              permissionBlock {
+                id
+                objectKind
+                objectType
+                objectId
+                scopeMode
+                effect
+                actions { id name }
+              }
+            }
+          }
+        }
+        """
+        offset = 0
+        while True:
+            page = self._graphql(
+                query,
+                {
+                    "tenantId": tenant_id,
+                    "subjectKind": "entity",
+                    "subjectId": device_id,
+                    "limit": 100,
+                    "offset": offset,
+                },
+            ).get("directPolicies") or {}
+            items = list(page.get("items") or [])
+            for item in items:
+                block = item.get("permissionBlock") or {}
+                actions = {
+                    str(action.get("name") or "")
+                    for action in (block.get("actions") or [])
+                }
+                if (
+                    block.get("objectKind") == "resource"
+                    and block.get("objectType") == "resource:channel"
+                    and block.get("objectId") == channel_id
+                    and str(block.get("effect") or "allow") == "allow"
+                    and "publish" in actions
+                ):
+                    return False
+            total = int(page.get("total") or 0)
+            if not items or offset + len(items) >= total:
+                break
+            offset += len(items)
+
+        action_id = self.capability_id("publish")
+        block_mutation = """
+        mutation CreatePermissionBlock($input: CreatePermissionBlockInput!) {
+          createPermissionBlock(input: $input) {
+            id
+          }
+        }
+        """
+        block = self._graphql(
+            block_mutation,
+            {
+                "input": {
+                    "tenantId": tenant_id,
+                    "scopeMode": "object",
+                    "objectKind": "resource",
+                    "objectType": "resource:channel",
+                    "objectId": channel_id,
+                    "effect": "allow",
+                    "actionIds": [action_id],
+                }
+            },
+        ).get("createPermissionBlock") or {}
+        block_id = str(block.get("id") or "")
+        if not block_id:
+            raise AtomError("Atom did not return the created permission block")
+
+        policy_mutation = """
+        mutation CreateDirectPolicy($input: CreateDirectPolicyInput!) {
+          createDirectPolicy(input: $input) { id }
+        }
+        """
+        policy = self._graphql(
+            policy_mutation,
+            {
+                "input": {
+                    "tenantId": tenant_id,
+                    "subjectKind": "entity",
+                    "subjectId": device_id,
+                    "permissionBlockId": block_id,
+                }
+            },
+        ).get("createDirectPolicy") or {}
+        if not policy.get("id"):
+            raise AtomError("Atom did not return the created direct policy")
+        return True
 
     def _paged(
         self,
