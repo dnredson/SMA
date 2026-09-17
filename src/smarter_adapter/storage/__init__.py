@@ -36,5 +36,11 @@ class DeviceStateStore(Protocol):
 
 
 from .sqlite import SQLiteStateStore
+from .management import SQLiteManagementStore
 
-__all__ = ["DeliveryQueueStore", "DeviceStateStore", "SQLiteStateStore"]
+__all__ = [
+    "DeliveryQueueStore",
+    "DeviceStateStore",
+    "SQLiteManagementStore",
+    "SQLiteStateStore",
+]
