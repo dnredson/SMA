@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from smarter_adapter.magistrala.control_plane import (
     BaseResources,
