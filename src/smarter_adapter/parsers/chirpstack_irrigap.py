@@ -80,7 +80,8 @@ def _greenstick_vwc(node_id: str, raw: float) -> float:
 
     The node ID is interpreted as hexadecimal, matching the existing Node-RED
     flow. Values outside the physical 0..100 % range are reported as 0, also
-    matching that flow.
+    matching that flow. Source sentinels are filtered before this function is
+    called, so an invalid ``-1`` cannot become a plausible ``0 %`` reading.
     """
 
     try:
@@ -96,6 +97,14 @@ def _greenstick_vwc(node_id: str, raw: float) -> float:
     if 0.0 < value < 100.0:
         return value
     return 0.0
+
+
+def _invalid_source(source_field: str) -> Dict[str, Any]:
+    return {
+        "quality": "invalid",
+        "quality_reason": "source_sentinel",
+        "source_field": source_field,
+    }
 
 
 class IrrigapChirpStackParser:
@@ -186,22 +195,36 @@ class IrrigapChirpStackParser:
         node = self._nodes.get(node_id)
         timestamp = _iso_epoch(envelope.get("time")) or event.received_at
 
+        # The deployment uses negative raw values as invalid/sentinel values.
+        # Temperature -1 alone can be physically meaningful, so classify it as
+        # a sentinel only when the raw moisture and EC fields are invalid too.
+        moisture_invalid = moisture_raw is not None and moisture_raw < 0.0
+        ec_invalid = ec_raw is not None and ec_raw < 0.0
+        packet_sentinel = bool(
+            moisture_invalid
+            and ec_invalid
+            and temperature is not None
+            and temperature == -1.0
+        )
+
         measurements = []
         if moisture_raw is not None:
-            measurements.append(
-                Measurement(
-                    name="soil.moisture",
-                    value=_greenstick_vwc(node_id, moisture_raw),
-                    unit="%",
-                    timestamp=timestamp,
+            if not moisture_invalid:
+                measurements.append(
+                    Measurement(
+                        name="soil.moisture",
+                        value=_greenstick_vwc(node_id, moisture_raw),
+                        unit="%",
+                        timestamp=timestamp,
+                    )
                 )
-            )
             measurements.append(
                 Measurement(
                     name="soil.raw.moisture_m1",
                     value=moisture_raw,
                     unit="mV",
                     timestamp=timestamp,
+                    metadata=_invalid_source("moisture") if moisture_invalid else {},
                 )
             )
         if temperature is not None:
@@ -211,14 +234,17 @@ class IrrigapChirpStackParser:
                     value=temperature,
                     unit="Cel",
                     timestamp=timestamp,
+                    metadata=_invalid_source("temperature") if packet_sentinel else {},
                 )
             )
         if ec_raw is not None:
+            ec_metadata = _invalid_source("electrical_conductivity") if ec_invalid else {}
             measurements.append(
                 Measurement(
                     name="soil.electrical_conductivity",
                     value=ec_raw,
                     timestamp=timestamp,
+                    metadata=ec_metadata,
                 )
             )
             measurements.append(
@@ -227,6 +253,7 @@ class IrrigapChirpStackParser:
                     value=ec_raw,
                     unit="mV",
                     timestamp=timestamp,
+                    metadata=ec_metadata,
                 )
             )
 
