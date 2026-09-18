@@ -25,11 +25,13 @@ class DeviceContextProvider:
         store,
         presence_policy,
         history_provider: TimescaleHistoryProvider,
+        gateway_presence_policy=None,
     ) -> None:
         self.reader = reader
         self.store = store
         self.presence = presence_policy
         self.history_provider = history_provider
+        self.gateway_presence = gateway_presence_policy
 
     @staticmethod
     def _public_value(item: Mapping[str, Any]) -> Any:
@@ -117,6 +119,46 @@ class DeviceContextProvider:
             ),
         }
 
+    def _gateway_links(
+        self,
+        workspace_id: str,
+        channel_id: str,
+        external_id: str,
+    ) -> list[dict[str, Any]]:
+        lister = getattr(self.store, "list_device_gateways", None)
+        if not callable(lister):
+            return []
+        links = [
+            dict(item)
+            for item in lister(workspace_id, channel_id, external_id)
+            if isinstance(item, Mapping)
+        ]
+        if self.gateway_presence is None:
+            return links
+
+        finder = getattr(self.store, "find_gateway", None)
+        if not callable(finder):
+            return links
+
+        enriched: list[dict[str, Any]] = []
+        for link in links:
+            item = dict(link)
+            gateway_id = str(item.get("gateway_id") or "").strip().lower()
+            gateway = finder(workspace_id, gateway_id) if gateway_id else None
+            if gateway is not None:
+                decorated = self.gateway_presence.decorate(gateway)
+                item["gateway_operational_status"] = decorated.get("operational_status")
+                item["gateway_last_seen"] = decorated.get("last_seen")
+                item["gateway_last_seen_age_seconds"] = decorated.get(
+                    "last_seen_age_seconds"
+                )
+                item["gateway_last_stats_at"] = decorated.get("last_stats_at")
+                item["gateway_last_stats_at_age_seconds"] = decorated.get(
+                    "last_stats_at_age_seconds"
+                )
+            enriched.append(item)
+        return enriched
+
     @staticmethod
     def _text(context: Mapping[str, Any]) -> str:
         device = context["device"]
@@ -159,6 +201,9 @@ class DeviceContextProvider:
             rendered_gateways = []
             for item in gateways[:3]:
                 extras = []
+                status = item.get("gateway_operational_status")
+                if status:
+                    extras.append(f"gateway {status}")
                 if item.get("rssi") is not None:
                     extras.append(f"RSSI {item['rssi']}")
                 if item.get("snr") is not None:
@@ -217,12 +262,7 @@ class DeviceContextProvider:
             if lifecycle:
                 administrative_state = str(lifecycle.get("administrative_state") or "active")
 
-        gateway_lister = getattr(self.store, "list_device_gateways", None)
-        observed_gateways = (
-            gateway_lister(workspace_id, channel_id, external_id)
-            if callable(gateway_lister)
-            else []
-        )
+        observed_gateways = self._gateway_links(workspace_id, channel_id, external_id)
 
         try:
             page = self.reader.list_device_messages(
