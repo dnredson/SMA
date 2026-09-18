@@ -124,6 +124,8 @@ class DeviceContextProvider:
         workspace_id: str,
         channel_id: str,
         external_id: str,
+        *,
+        now: Optional[float] = None,
     ) -> list[dict[str, Any]]:
         lister = getattr(self.store, "list_device_gateways", None)
         if not callable(lister):
@@ -146,7 +148,7 @@ class DeviceContextProvider:
             gateway_id = str(item.get("gateway_id") or "").strip().lower()
             gateway = finder(workspace_id, gateway_id) if gateway_id else None
             if gateway is not None:
-                decorated = self.gateway_presence.decorate(gateway)
+                decorated = self.gateway_presence.decorate(gateway, now=now)
                 item["gateway_operational_status"] = decorated.get("operational_status")
                 item["gateway_last_seen"] = decorated.get("last_seen")
                 item["gateway_last_seen_age_seconds"] = decorated.get(
@@ -201,9 +203,8 @@ class DeviceContextProvider:
             rendered_gateways = []
             for item in gateways[:3]:
                 extras = []
-                status = item.get("gateway_operational_status")
-                if status:
-                    extras.append(f"gateway {status}")
+                if item.get("gateway_operational_status"):
+                    extras.append("gateway " + str(item["gateway_operational_status"]))
                 if item.get("rssi") is not None:
                     extras.append(f"RSSI {item['rssi']}")
                 if item.get("snr") is not None:
