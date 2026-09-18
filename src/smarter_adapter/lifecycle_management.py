@@ -368,6 +368,7 @@ class LifecycleManagementServer(ThreadingHTTPServer):
                 store=store,
                 presence_policy=presence_policy,
                 history_provider=TimescaleHistoryProvider(reader),
+                gateway_presence_policy=self.gateway_presence_policy,
             )
         else:
             self.context_provider = None
