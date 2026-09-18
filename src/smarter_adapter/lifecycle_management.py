@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlparse
 
 from .device_context import DeviceContextProvider
 from .device_lifecycle import DeviceLifecycleController, LifecycleRemoteError
+from .gateway_monitor import GatewayPresencePolicy
 from .historical_intelligence import TimescaleHistoryProvider
 from .management import _Handler
 from .reconciliation import ControlPlaneReconciler
@@ -25,6 +26,10 @@ class _LifecycleHandler(_Handler):
     @property
     def context_provider(self) -> Optional[DeviceContextProvider]:
         return self.server.context_provider  # type: ignore[attr-defined]
+
+    @property
+    def gateway_presence(self) -> GatewayPresencePolicy:
+        return self.server.gateway_presence_policy  # type: ignore[attr-defined]
 
     @staticmethod
     def _lifecycle_action(path: str) -> Optional[tuple[str, str]]:
@@ -50,6 +55,16 @@ class _LifecycleHandler(_Handler):
         if not raw or "/" in raw:
             return None
         return unquote(raw)
+
+    @staticmethod
+    def _gateway_id(path: str) -> Optional[str]:
+        prefix = "/api/v2/gateways/"
+        if not path.startswith(prefix):
+            return None
+        raw = path[len(prefix) :].strip("/")
+        if not raw or "/" in raw:
+            return None
+        return unquote(raw).strip().lower()
 
     def _optional_json_object(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length", "")
@@ -102,6 +117,37 @@ class _LifecycleHandler(_Handler):
             "active": int(payload.get("active", payload.get("total", 0))),
         }
 
+    def _gateway_items(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        base = self.runtime.base
+        lister = getattr(self.store, "list_gateways", None)
+        if base is None or not callable(lister):
+            return []
+        return [
+            self.gateway_presence.decorate(item)
+            for item in lister(base.workspace.id, limit=limit)
+        ]
+
+    def _gateway_summary(self, items: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+        if items is None:
+            items = self._gateway_items(limit=100000)
+        counts = {"online": 0, "stale": 0, "offline": 0}
+        for item in items:
+            state = str(item.get("operational_status") or "offline")
+            if state in counts:
+                counts[state] += 1
+        return {
+            "total": len(items),
+            **counts,
+            "expected_interval_seconds": self.gateway_presence.expected_interval_seconds,
+            "stale_after_seconds": self.gateway_presence.stale_after_seconds,
+            "offline_after_seconds": self.gateway_presence.offline_after_seconds,
+        }
+
+    def _status_payload(self) -> dict:
+        payload = super()._status_payload()
+        payload["gateways"] = self._gateway_summary()
+        return payload
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -131,6 +177,40 @@ class _LifecycleHandler(_Handler):
                 self._error(500, str(exc))
                 return
             self._send(200, context)
+            return
+
+        if path == "/api/v2/gateways":
+            if not self._authorized():
+                self._error(401, "unauthorized")
+                return
+            query = dict()
+            try:
+                from urllib.parse import parse_qs
+
+                query = parse_qs(parsed.query)
+                limit = min(max(int((query.get("limit") or [100])[0]), 1), 1000)
+            except ValueError:
+                self._error(400, "limit must be an integer")
+                return
+            items = self._gateway_items(limit=limit)
+            self._send(200, {"summary": self._gateway_summary(items), "items": items})
+            return
+
+        gateway_id = self._gateway_id(path)
+        if gateway_id is not None:
+            if not self._authorized():
+                self._error(401, "unauthorized")
+                return
+            base = self.runtime.base
+            finder = getattr(self.store, "find_gateway", None)
+            if base is None or not callable(finder):
+                self._error(503, "gateway registry is not configured")
+                return
+            item = finder(base.workspace.id, gateway_id)
+            if item is None:
+                self._error(404, "gateway not found")
+                return
+            self._send(200, self.gateway_presence.decorate(item))
             return
 
         prefix = "/api/v2/catalog/devices/"
@@ -248,6 +328,7 @@ class LifecycleManagementServer(ThreadingHTTPServer):
         api_token: str = "",
         reconciler: Optional[ControlPlaneReconciler] = None,
         context_provider: Optional[DeviceContextProvider] = None,
+        gateway_presence_policy: Optional[GatewayPresencePolicy] = None,
     ) -> None:
         super().__init__(address, _LifecycleHandler)
         self.service = service
@@ -258,6 +339,7 @@ class LifecycleManagementServer(ThreadingHTTPServer):
         self.catalog_manager = catalog_manager
         self.api_token = api_token
         self.lifecycle_controller = lifecycle_controller
+        self.gateway_presence_policy = gateway_presence_policy or GatewayPresencePolicy()
 
         # Backward-compatible construction: older component tests and custom
         # embeddings can use lifecycle management without exposing an Atom
@@ -305,6 +387,7 @@ def start_lifecycle_management_server(
     api_token: str = "",
     reconciler: Optional[ControlPlaneReconciler] = None,
     context_provider: Optional[DeviceContextProvider] = None,
+    gateway_presence_policy: Optional[GatewayPresencePolicy] = None,
 ) -> LifecycleManagementServer:
     server = LifecycleManagementServer(
         (host, int(port)),
@@ -318,6 +401,7 @@ def start_lifecycle_management_server(
         api_token=api_token,
         reconciler=reconciler,
         context_provider=context_provider,
+        gateway_presence_policy=gateway_presence_policy,
     )
     thread = Thread(
         target=server.serve_forever,
