@@ -50,6 +50,9 @@ chmod 600 .env
 $EDITOR .env
 ```
 
+Run the `cp` step only for a new installation. On an existing deployment, do
+not overwrite `.env`: it contains the machine-local credentials and settings.
+
 `.env.example` is safe to commit and documents the supported runtime variables.
 The real `.env` is intentionally ignored by Git and must contain deployment
 credentials only on the target machine.
@@ -97,15 +100,26 @@ GET  /ready
 GET  /metrics
 GET  /api/v2/status
 GET  /api/v2/devices
+GET  /api/v2/devices/{external_id}/messages
+GET  /api/v2/devices/{external_id}/context
 GET  /api/v2/retry
 GET  /api/v2/dlq
 POST /api/v2/reconcile
 GET  /api/v2/catalog/devices
 ```
 
-Additional catalog lifecycle and per-device telemetry endpoints are available
-under `/api/v2`. Set `SMA_API_TOKEN` to require `Authorization: Bearer ...` for
-protected routes.
+`GET /api/v2/devices/{external_id}/context` builds provider-neutral context on
+demand. It combines durable SMA identity/presence/quality/lifecycle state with
+the latest persisted Timescale observation and recent trend summaries. This
+allows an agent or LLM integration to inspect a managed sensor without waiting
+for the next MQTT event. The endpoint keeps persisted measurements distinct
+from newer adapter state; a delayed Timescale writer therefore cannot replace
+the adapter's latest quality snapshot. If Timescale is temporarily unavailable,
+the endpoint still returns durable device state and marks observation/history
+as unavailable.
+
+Additional catalog lifecycle endpoints are available under `/api/v2`. Set
+`SMA_API_TOKEN` to require `Authorization: Bearer ...` for protected routes.
 
 ## Run tests
 
