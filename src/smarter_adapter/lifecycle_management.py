@@ -6,7 +6,9 @@ from threading import Thread
 from typing import Any, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
+from .device_context import DeviceContextProvider
 from .device_lifecycle import DeviceLifecycleController, LifecycleRemoteError
+from .historical_intelligence import TimescaleHistoryProvider
 from .management import _Handler
 from .reconciliation import ControlPlaneReconciler
 
@@ -19,6 +21,10 @@ class _LifecycleHandler(_Handler):
     @property
     def reconciler(self) -> Optional[ControlPlaneReconciler]:
         return self.server.reconciler  # type: ignore[attr-defined]
+
+    @property
+    def context_provider(self) -> Optional[DeviceContextProvider]:
+        return self.server.context_provider  # type: ignore[attr-defined]
 
     @staticmethod
     def _lifecycle_action(path: str) -> Optional[tuple[str, str]]:
@@ -33,6 +39,17 @@ class _LifecycleHandler(_Handler):
         if not node_id:
             return None
         return node_id, parts[1]
+
+    @staticmethod
+    def _device_context_external_id(path: str) -> Optional[str]:
+        prefix = "/api/v2/devices/"
+        suffix = "/context"
+        if not path.startswith(prefix) or not path.endswith(suffix):
+            return None
+        raw = path[len(prefix) : -len(suffix)].strip("/")
+        if not raw or "/" in raw:
+            return None
+        return unquote(raw)
 
     def _optional_json_object(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length", "")
@@ -88,6 +105,34 @@ class _LifecycleHandler(_Handler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
+
+        external_id = self._device_context_external_id(path)
+        if external_id is not None:
+            if not self._authorized():
+                self._error(401, "unauthorized")
+                return
+            if self.context_provider is None:
+                self._error(503, "device context provider is not configured")
+                return
+            base = self.runtime.base
+            if base is None:
+                self._error(503, "runtime is not bootstrapped")
+                return
+            try:
+                context = self.context_provider.build(
+                    workspace_id=base.workspace.id,
+                    channel_id=base.channel.id,
+                    external_id=external_id,
+                )
+            except KeyError:
+                self._error(404, "managed device not found")
+                return
+            except Exception as exc:
+                self._error(500, str(exc))
+                return
+            self._send(200, context)
+            return
+
         prefix = "/api/v2/catalog/devices/"
         if path.startswith(prefix) and "/" not in path[len(prefix) :]:
             if not self._authorized():
@@ -202,6 +247,7 @@ class LifecycleManagementServer(ThreadingHTTPServer):
         catalog_manager=None,
         api_token: str = "",
         reconciler: Optional[ControlPlaneReconciler] = None,
+        context_provider: Optional[DeviceContextProvider] = None,
     ) -> None:
         super().__init__(address, _LifecycleHandler)
         self.service = service
@@ -232,6 +278,18 @@ class LifecycleManagementServer(ThreadingHTTPServer):
                 else None
             )
 
+        if context_provider is not None:
+            self.context_provider = context_provider
+        elif reader is not None and presence_policy is not None:
+            self.context_provider = DeviceContextProvider(
+                reader=reader,
+                store=store,
+                presence_policy=presence_policy,
+                history_provider=TimescaleHistoryProvider(reader),
+            )
+        else:
+            self.context_provider = None
+
 
 def start_lifecycle_management_server(
     *,
@@ -246,6 +304,7 @@ def start_lifecycle_management_server(
     catalog_manager=None,
     api_token: str = "",
     reconciler: Optional[ControlPlaneReconciler] = None,
+    context_provider: Optional[DeviceContextProvider] = None,
 ) -> LifecycleManagementServer:
     server = LifecycleManagementServer(
         (host, int(port)),
@@ -258,6 +317,7 @@ def start_lifecycle_management_server(
         catalog_manager=catalog_manager,
         api_token=api_token,
         reconciler=reconciler,
+        context_provider=context_provider,
     )
     thread = Thread(
         target=server.serve_forever,
