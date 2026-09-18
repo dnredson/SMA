@@ -10,7 +10,7 @@ from .historical_intelligence import TimescaleHistoryProvider
 class DeviceContextProvider:
     """Build provider-neutral device context without waiting for new telemetry.
 
-    Durable adapter state (identity, presence and latest quality snapshot) comes
+    Durable adapter state (identity, presence and latest quality snapshots) comes
     from the SMA management store. Measurements and trends come from persisted
     Magistrala Timescale rows. The two sources are intentionally kept distinct:
     a delayed Timescale writer must never overwrite newer adapter quality state.
@@ -124,6 +124,7 @@ class DeviceContextProvider:
         deployment = context["deployment"]
         latest = context["latest_observation"]
         history = context["history"]
+        network = context.get("network") or {}
 
         where = "/".join(
             str(value)
@@ -139,11 +140,32 @@ class DeviceContextProvider:
             f"adapter data quality is {state['data_quality']}",
         ]
 
+        quality_by_role = state.get("quality_by_role") or {}
+        if quality_by_role:
+            rendered_roles = ", ".join(
+                f"{role}={value.get('data_quality', 'unknown')}"
+                for role, value in sorted(quality_by_role.items())
+            )
+            parts.append("quality by message role: " + rendered_roles)
+
         if state.get("invalid_fields"):
             parts.append(
                 "invalid fields: " + ", ".join(state["invalid_fields"])
                 + "; treat them as unavailable, not zero"
             )
+
+        gateways = list(network.get("observed_by_gateways") or [])
+        if gateways:
+            rendered_gateways = []
+            for item in gateways[:3]:
+                extras = []
+                if item.get("rssi") is not None:
+                    extras.append(f"RSSI {item['rssi']}")
+                if item.get("snr") is not None:
+                    extras.append(f"SNR {item['snr']}")
+                suffix = " (" + ", ".join(extras) + ")" if extras else ""
+                rendered_gateways.append(str(item.get("gateway_id")) + suffix)
+            parts.append("observed by LoRaWAN gateway(s): " + ", ".join(rendered_gateways))
 
         if latest.get("status") == "available":
             rendered = []
@@ -195,6 +217,13 @@ class DeviceContextProvider:
             if lifecycle:
                 administrative_state = str(lifecycle.get("administrative_state") or "active")
 
+        gateway_lister = getattr(self.store, "list_device_gateways", None)
+        observed_gateways = (
+            gateway_lister(workspace_id, channel_id, external_id)
+            if callable(gateway_lister)
+            else []
+        )
+
         try:
             page = self.reader.list_device_messages(
                 workspace_id,
@@ -222,6 +251,10 @@ class DeviceContextProvider:
             }
             history = self._unavailable_history(exc)
 
+        transport = metadata.get("transport")
+        if not isinstance(transport, dict):
+            transport = {}
+
         context: dict[str, Any] = {
             "schema": self.schema,
             "kind": "managed_device_context",
@@ -240,6 +273,10 @@ class DeviceContextProvider:
                 "depth": metadata.get("depth"),
                 "application_id": metadata.get("application_id"),
                 "f_port": metadata.get("f_port"),
+                "message_role": metadata.get("message_role"),
+                "port_role": metadata.get("port_role"),
+                "mqtt_topic": metadata.get("topic") or transport.get("mqtt_topic"),
+                "transport": transport,
             },
             "state": {
                 "administrative_state": administrative_state,
@@ -250,6 +287,10 @@ class DeviceContextProvider:
                 "invalid_fields": list(decorated.get("invalid_fields") or []),
                 "quality_evaluated_at": decorated.get("quality_evaluated_at"),
                 "quality_source_received_at": decorated.get("quality_source_received_at"),
+                "quality_by_role": dict(decorated.get("quality_by_role") or {}),
+            },
+            "network": {
+                "observed_by_gateways": observed_gateways,
             },
             "latest_observation": latest,
             "history": history,
