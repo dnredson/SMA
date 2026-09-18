@@ -51,13 +51,19 @@ class DeviceContextGatewayPresenceTests(unittest.TestCase):
                         offline_after_seconds=180,
                     ),
                 )
-                links = provider._gateway_links("ws", "ch", "teros12-sector1.3")
+                links = provider._gateway_links(
+                    "ws",
+                    "ch",
+                    "teros12-sector1.3",
+                    now=1020,
+                )
                 self.assertEqual(len(links), 1)
                 self.assertEqual(links[0]["gateway_id"], "000000ffff001002")
                 self.assertEqual(links[0]["gateway_operational_status"], "online")
                 self.assertEqual(links[0]["rssi"], -42.0)
                 self.assertEqual(links[0]["snr"], 12.5)
                 self.assertEqual(links[0]["gateway_last_stats_at"], 1000.0)
+                self.assertEqual(links[0]["gateway_last_stats_at_age_seconds"], 20.0)
             finally:
                 store.close()
 
