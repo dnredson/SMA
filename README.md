@@ -121,6 +121,46 @@ as unavailable.
 Additional catalog lifecycle endpoints are available under `/api/v2`. Set
 `SMA_API_TOKEN` to require `Authorization: Bearer ...` for protected routes.
 
+## Passive field sample capture
+
+For parser/calibration work, `scripts/capture_irrigap_samples.py` can passively
+collect real ChirpStack `event/up` packets without sending anything back to the
+broker. By default it reuses broker settings from the local `.env`, subscribes
+only to the configured Irrigap application telemetry topic, decodes the base64
+payload, and writes one self-contained JSON record per MQTT message.
+
+```bash
+source .venv/bin/activate
+python scripts/capture_irrigap_samples.py
+```
+
+Captured JSONL files are written under `captures/` and are ignored by Git
+because they can contain deployment/device identifiers. Each record keeps the
+original ChirpStack envelope plus convenient fields such as device name,
+DevEUI, fPort, decoded UTF-8/hex payload and parsed ultralight key/value pairs.
+
+Useful filters/examples:
+
+```bash
+# One specific device, unlimited duration
+python scripts/capture_irrigap_samples.py \
+  --device teros12-sector1.3
+
+# Two devices for one hour
+python scripts/capture_irrigap_samples.py \
+  --device teros12-sector1.3 \
+  --device TEST-GREENSTICK-3303 \
+  --duration 3600
+
+# Stop after 100 matching packets
+python scripts/capture_irrigap_samples.py \
+  --max-messages 100
+```
+
+The capture tool is intentionally observational only. The SMA write-enabled
+runtime should continue using the narrow telemetry topic rather than a broad
+`#` subscription.
+
 ## Run tests
 
 ```bash
