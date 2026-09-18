@@ -13,9 +13,15 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from smarter_adapter.device_lifecycle import (
     DeviceLifecycleController,
-    LifecycleBindingSQLiteManagementStore,
     LifecycleIrrigapCatalogManager,
     LifecycleSmarterAdapterRuntime,
+)
+from smarter_adapter.gateway_monitor import (
+    GatewayMqttConfig,
+    GatewayMqttObserver,
+    GatewayPresencePolicy,
+    GatewayRegistry,
+    GatewayTopologySQLiteManagementStore,
 )
 from smarter_adapter.historical_intelligence import (
     AsyncIntelligenceSideChannel,
@@ -45,6 +51,15 @@ from smarter_adapter.runtime import RuntimeConfig
 
 def env(name: str, default: str = "") -> str:
     return str(os.getenv(name, default)).strip()
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = env(name, "true" if default else "false").lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{name} must be true/false")
 
 
 def environment_defaults(name: str) -> dict[str, str]:
@@ -155,8 +170,6 @@ def main() -> int:
         atom.token,
         invalidate_token=atom.tokens.invalidate,
     )
-    # Intelligence gets a shorter Reader timeout because it is optional context
-    # and must not accumulate indefinitely while Timescale is unavailable.
     history_reader = TimescaleReaderClient(
         reader_url,
         atom.token,
@@ -185,7 +198,7 @@ def main() -> int:
     pipeline = ParsePipeline(parsers)
 
     state_path = Path(env("SMA_STATE_DB", deployment["state_db"]))
-    state_store = LifecycleBindingSQLiteManagementStore(state_path)
+    state_store = GatewayTopologySQLiteManagementStore(state_path)
     runtime_config = RuntimeConfig(
         workspace_name=env("SMA_WORKSPACE_NAME", deployment["workspace_name"]),
         workspace_alias=env("SMA_WORKSPACE_ALIAS", deployment["workspace_alias"]),
@@ -202,8 +215,6 @@ def main() -> int:
         state_store=state_store,
     )
 
-    # Intelligence side channels are deliberately outside the primary delivery
-    # path: an alert/LLM broker or Reader outage must never trigger telemetry retries.
     try:
         threshold_policy = ThresholdPolicy.from_json(env("SMA_QUALITY_THRESHOLDS_JSON"))
     except (ValueError, json.JSONDecodeError) as exc:
@@ -277,11 +288,12 @@ def main() -> int:
                 f"side-channel external={parsed.external_device_id} state={intelligence_state}"
             )
 
+        role = str(parsed.metadata.get("message_role") or "unknown")
         print(
             "OK "
             f"parser={result.parser} external={parsed.external_device_id} "
             f"device={result.device.id} cache={result.device_cache_source} "
-            f"profile={result.profile_key} "
+            f"profile={result.profile_key} role={role} "
             f"quality={result.quality_status}{quality_detail} "
             f"alerts={len(adapter_alerts)} context={context_state} "
             f"records={len(result.senml)} http={result.publish.status}",
@@ -310,6 +322,15 @@ def main() -> int:
         stale_after_seconds=float(env("SMA_DEVICE_STALE_AFTER", "300")),
         offline_after_seconds=float(env("SMA_DEVICE_OFFLINE_AFTER", "1800")),
     )
+    gateway_presence_policy = GatewayPresencePolicy(
+        expected_interval_seconds=float(env("SMA_GATEWAY_EXPECTED_INTERVAL", "30")),
+        stale_after_seconds=float(env("SMA_GATEWAY_STALE_AFTER", "90")),
+        offline_after_seconds=float(env("SMA_GATEWAY_OFFLINE_AFTER", "180")),
+    )
+    gateway_enabled = env_bool(
+        "SMA_GATEWAY_MONITOR_ENABLED",
+        default=deployment["environment"] == "irrigap",
+    )
 
     def catalog_binding(node_id: str):
         base = runtime.base
@@ -332,6 +353,7 @@ def main() -> int:
             "last_seen": decorated["last_seen"],
             "last_seen_age_seconds": decorated["last_seen_age_seconds"],
             "data_quality": decorated.get("data_quality", "unknown"),
+            "quality_by_role": decorated.get("quality_by_role", {}),
             "invalid_fields": decorated.get("invalid_fields", []),
             "quality_evaluated_at": decorated.get("quality_evaluated_at"),
             "quality_source_received_at": decorated.get("quality_source_received_at"),
@@ -378,6 +400,27 @@ def main() -> int:
         atom=atom,
     )
 
+    gateway_registry = GatewayRegistry(runtime=runtime, control=control, store=state_store)
+    gateway_observer = None
+    if gateway_enabled:
+        primary = configs[0]
+        raw_topics = env("SMA_GATEWAY_MQTT_TOPICS")
+        topics = tuple(
+            item.strip() for item in raw_topics.split(",") if item.strip()
+        ) if raw_topics else GatewayMqttConfig.topics
+        gateway_observer = GatewayMqttObserver(
+            GatewayMqttConfig(
+                host=env("SMA_GATEWAY_MQTT_HOST", primary.host),
+                port=int(env("SMA_GATEWAY_MQTT_PORT", str(primary.port))),
+                qos=int(env("SMA_GATEWAY_MQTT_QOS", "0")),
+                username=env("SMA_GATEWAY_MQTT_USERNAME", primary.username),
+                password=env("SMA_GATEWAY_MQTT_PASSWORD", primary.password),
+                client_id=env("SMA_GATEWAY_MQTT_CLIENT_ID", "smarter-adapter-gateway-monitor"),
+                topics=topics,
+            ),
+            gateway_registry,
+        )
+
     api_host = env("SMA_API_HOST", "127.0.0.1")
     api_port = int(env("SMA_API_PORT", "8082"))
     api_token = env("SMA_API_TOKEN")
@@ -400,7 +443,7 @@ def main() -> int:
         print(
             "Profiles:  generic fallback; typed="
             + ",".join(runtime.profile_registry.families)
-            + " migration=in-place"
+            + " migration=in-place; gateway=lorawan"
         )
         print(
             "Alerts:    "
@@ -429,6 +472,19 @@ def main() -> int:
             f"offline>{presence_policy.offline_after_seconds}s"
         )
         print(
+            "Gateways:  "
+            f"monitor={'enabled' if gateway_enabled else 'disabled'} "
+            f"expected={gateway_presence_policy.expected_interval_seconds}s "
+            f"stale>{gateway_presence_policy.stale_after_seconds}s "
+            f"offline>{gateway_presence_policy.offline_after_seconds}s"
+        )
+        if gateway_observer is not None:
+            print(
+                "GW input:  "
+                f"{gateway_observer.config.host}:{gateway_observer.config.port} "
+                f"topics={','.join(gateway_observer.config.topics)}"
+            )
+        print(
             "Retry:     "
             f"max={retry_policy.max_attempts} base={retry_policy.base_delay_seconds}s "
             f"max_delay={retry_policy.max_delay_seconds}s"
@@ -439,6 +495,8 @@ def main() -> int:
         print("Bootstrapping and starting inputs...")
         intelligence_worker.start()
         service.start()
+        if gateway_observer is not None:
+            gateway_observer.start()
         management = start_lifecycle_management_server(
             host=api_host,
             port=api_port,
@@ -450,6 +508,7 @@ def main() -> int:
             presence_policy=presence_policy,
             catalog_manager=catalog_manager,
             api_token=api_token,
+            gateway_presence_policy=gateway_presence_policy,
         )
         assert runtime.base is not None
         assert runtime.persistence_rule is not None
@@ -462,6 +521,8 @@ def main() -> int:
         if management is not None:
             management.shutdown()
             management.server_close()
+        if gateway_observer is not None:
+            gateway_observer.stop()
         service.stop()
         intelligence_worker.close()
         alert_publisher.close()
