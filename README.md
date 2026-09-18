@@ -5,8 +5,9 @@ parsers, normalizes their measurements to SenML JSON, and publishes them to
 Magistrala through the current Atom-backed FluxMQ HTTP API.
 
 The v2 runtime also manages persistent device mappings and lifecycle state,
-Atom profiles/policies, retry/DLQ, data quality, presence, MQTT alerts, and
-provider-neutral LLM context with optional Timescale history/trends.
+Atom profiles/policies, retry/DLQ, data quality, presence, LoRaWAN gateway
+presence/topology, MQTT alerts, and provider-neutral LLM context with optional
+Timescale history/trends.
 
 ## Magistrala / Atom integration
 
@@ -38,6 +39,68 @@ On first observation, SMA can create/reconcile the Atom device, typed profile,
 and direct `publish` policy for the configured channel. Local SQLite state
 keeps durable mappings, lifecycle/retry/DLQ/quality metadata and does not store
 a per-device secret.
+
+LoRaWAN gateways are also represented as Atom entities under the dedicated
+`smarter-adapter-lorawan-gateway` profile. Gateway entities are observational
+infrastructure objects and deliberately do not receive the sensor channel
+`publish` permission.
+
+## ChirpStack message roles and provenance
+
+A single physical ChirpStack device can use different LoRaWAN fPorts for
+different logical payloads. SMA keeps the transport metadata (`mqtt_topic`,
+`f_port`, application id and a configurable port-role hint) but interprets the
+payload from its actual keys rather than from field position.
+
+For the current Irrigap traffic this distinguishes, for example:
+
+```text
+fPort 1   + VB/BT -> battery.voltage / battery.level
+fPort 31  + M/T/C -> soil telemetry
+```
+
+The parser no longer treats a battery frame such as `VB|4.2|BT|100` as if
+`4.2` were soil moisture and `100` were temperature. Greenstick calibration is
+applied only to Greenstick nodes; Teros12 raw moisture is preserved until a
+Teros-specific calibration is explicitly validated.
+
+ChirpStack `rxInfo` is normalized as gateway reception metadata (gateway id,
+RSSI, SNR, channel, RF chain and CRC status). After successful telemetry
+publication SMA persists the observed sensor-to-gateway relationship.
+
+Data-quality snapshots are also maintained per logical message role. A valid
+battery frame therefore cannot hide a still-invalid soil snapshot for the same
+physical sensor.
+
+## LoRaWAN gateway presence
+
+The gateway monitor is a separate read-only MQTT side input. It does not widen
+the main sensor pipeline subscription, so gateway traffic cannot fall through
+the sensor parser into the retry/DLQ path.
+
+By default it observes:
+
+```text
++/gateway/+/event/stats
+gateway/+/state/conn
++/gateway/+/state/conn
+```
+
+Periodic `event/stats` traffic and sensor `rxInfo` both provide operational
+activity. Retained `state/conn` packets can discover a gateway but do not by
+themselves mark it online, avoiding a false-positive liveness state when SMA
+subscribes after a broker reconnect.
+
+The Irrigap defaults reflect the measured ~30 second stats interval:
+
+```text
+expected interval = 30 s
+stale after       = 90 s
+offline after     = 180 s
+```
+
+All thresholds and gateway MQTT settings are configurable in `.env.example`.
+Gateway presence and topology are persisted in the same SQLite state database.
 
 ## Quick start / deployment configuration
 
@@ -79,12 +142,13 @@ Important groups in `.env.example` include:
 
 - Magistrala/Atom connection and authentication
 - sensor MQTT input
+- LoRaWAN gateway monitoring and presence thresholds
 - Management API bearer token
 - persistent retry/DLQ policy
 - MQTT alert side-channel
 - LLM-context side-channel
 - Timescale history/trend settings
-- presence thresholds
+- sensor presence thresholds
 
 For another deployment, replace the Irrigap broker/topic/catalog values rather
 than committing site-specific credentials.
@@ -102,6 +166,8 @@ GET  /api/v2/status
 GET  /api/v2/devices
 GET  /api/v2/devices/{external_id}/messages
 GET  /api/v2/devices/{external_id}/context
+GET  /api/v2/gateways
+GET  /api/v2/gateways/{gateway_id}
 GET  /api/v2/retry
 GET  /api/v2/dlq
 POST /api/v2/reconcile
@@ -110,13 +176,19 @@ GET  /api/v2/catalog/devices
 
 `GET /api/v2/devices/{external_id}/context` builds provider-neutral context on
 demand. It combines durable SMA identity/presence/quality/lifecycle state with
-the latest persisted Timescale observation and recent trend summaries. This
-allows an agent or LLM integration to inspect a managed sensor without waiting
-for the next MQTT event. The endpoint keeps persisted measurements distinct
-from newer adapter state; a delayed Timescale writer therefore cannot replace
-the adapter's latest quality snapshot. If Timescale is temporarily unavailable,
-the endpoint still returns durable device state and marks observation/history
-as unavailable.
+the latest persisted Timescale observation and recent trend summaries. When
+available, it also includes the LoRaWAN gateways that recently received the
+sensor, including last RSSI/SNR information. This allows an agent or LLM
+integration to inspect a managed sensor without waiting for the next MQTT
+event.
+
+The endpoint keeps persisted measurements distinct from newer adapter state; a
+delayed Timescale writer therefore cannot replace the adapter's latest quality
+snapshot. If Timescale is temporarily unavailable, the endpoint still returns
+durable device state and marks observation/history as unavailable.
+
+`GET /api/v2/gateways` exposes derived online/stale/offline presence plus last
+stats/uplink/connection timestamps, Atom entity id, counters and topic root.
 
 Additional catalog lifecycle endpoints are available under `/api/v2`. Set
 `SMA_API_TOKEN` to require `Authorization: Bearer ...` for protected routes.
@@ -124,10 +196,10 @@ Additional catalog lifecycle endpoints are available under `/api/v2`. Set
 ## Passive field sample capture
 
 For parser/calibration work, `scripts/capture_irrigap_samples.py` can passively
-collect real ChirpStack `event/up` packets without sending anything back to the
-broker. By default it reuses broker settings from the local `.env`, subscribes
-only to the configured Irrigap application telemetry topic, decodes the base64
-payload, and writes one self-contained JSON record per MQTT message.
+collect real MQTT packets without sending anything back to the broker. By
+default it reuses broker settings from the local `.env`, subscribes only to the
+configured Irrigap application telemetry topic, decodes the base64 payload, and
+writes one self-contained JSON record per MQTT message.
 
 ```bash
 source .venv/bin/activate
@@ -136,8 +208,8 @@ python scripts/capture_irrigap_samples.py
 
 Captured JSONL files are written under `captures/` and are ignored by Git
 because they can contain deployment/device identifiers. Each record keeps the
-original ChirpStack envelope plus convenient fields such as device name,
-DevEUI, fPort, decoded UTF-8/hex payload and parsed ultralight key/value pairs.
+original topic/envelope plus convenient fields such as device name, DevEUI,
+fPort, decoded UTF-8/hex payload and parsed ultralight key/value pairs.
 
 Useful filters/examples:
 
@@ -145,6 +217,9 @@ Useful filters/examples:
 # One specific device, unlimited duration
 python scripts/capture_irrigap_samples.py \
   --device teros12-sector1.3
+
+# Inventory the complete broker passively, including gateway/direct-sensor topics
+python scripts/capture_irrigap_samples.py --all-topics
 
 # Two devices for one hour
 python scripts/capture_irrigap_samples.py \
@@ -158,8 +233,9 @@ python scripts/capture_irrigap_samples.py \
 ```
 
 The capture tool is intentionally observational only. The SMA write-enabled
-runtime should continue using the narrow telemetry topic rather than a broad
-`#` subscription.
+sensor runtime should continue using the narrow telemetry topic rather than a
+broad `#` subscription; gateway liveness uses its own dedicated read-only
+subscriptions.
 
 ## Run tests
 
