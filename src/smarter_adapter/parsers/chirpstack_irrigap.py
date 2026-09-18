@@ -25,6 +25,11 @@ _KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 NodeResolver = Callable[[str], Optional[IrrigapNode]]
 
 
+DEFAULT_PORT_ROLES: Mapping[int, str] = {
+    1: "battery",
+}
+
+
 def _iso_epoch(value: Any) -> Optional[float]:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -62,6 +67,16 @@ def _first_numeric(mapping: Mapping[str, str], prefix: str) -> Optional[float]:
     return None
 
 
+def _exact_numeric(mapping: Mapping[str, str], key: str) -> Optional[float]:
+    raw = mapping.get(key.upper())
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _greenstick_vwc(node_id: str, raw: float) -> float:
     """Calibration provided by the Irrigap deployment collaborator.
 
@@ -94,18 +109,40 @@ def _invalid_source(source_field: str) -> Dict[str, Any]:
     }
 
 
+def _normalized_rx_info(envelope: Mapping[str, Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    raw_items = envelope.get("rxInfo")
+    if not isinstance(raw_items, list):
+        return result
+    for raw in raw_items:
+        if not isinstance(raw, Mapping):
+            continue
+        gateway_id = str(raw.get("gatewayId") or "").strip().lower()
+        if not gateway_id:
+            continue
+        item: dict[str, Any] = {"gateway_id": gateway_id}
+        for source_key, target_key in (
+            ("rssi", "rssi"),
+            ("snr", "snr"),
+            ("channel", "channel"),
+            ("rfChain", "rf_chain"),
+            ("crcStatus", "crc_status"),
+        ):
+            value = raw.get(source_key)
+            if value is not None:
+                item[target_key] = value
+        result.append(item)
+    return result
+
+
 class IrrigapChirpStackParser:
     """Parse the ChirpStack MQTT envelope used by the Irrigap deployment.
 
-    Expected envelope fields are `data` (base64 sensor payload), `time`,
-    `deviceInfo.deviceName` and `fPort`. The decoded payload is key/value
-    ultralight text, for example::
-
-        S|2509170900|I|3303|M1|1261|T1|22.1|C1|640
-
-    Deployment metadata may be supplied as a static ``nodes`` tuple or through
-    a live ``node_resolver``. Unknown nodes still parse and are simply emitted
-    without location/depth metadata.
+    The same physical device can send different logical payloads on different
+    LoRaWAN fPorts. Payload keys remain authoritative for interpretation while
+    the fPort is preserved as transport metadata and as a configurable role
+    hint. This prevents a battery frame (for example ``VB``/``BT`` on fPort 1)
+    from being misread positionally as soil moisture/temperature.
     """
 
     name = "chirpstack-irrigap-v2"
@@ -115,9 +152,15 @@ class IrrigapChirpStackParser:
         nodes: Tuple[IrrigapNode, ...] = (),
         *,
         node_resolver: Optional[NodeResolver] = None,
+        port_roles: Mapping[int, str] = DEFAULT_PORT_ROLES,
     ) -> None:
         self._nodes = {node.id.upper(): node for node in nodes}
         self._node_resolver = node_resolver
+        self._port_roles = {
+            int(port): str(role).strip().lower()
+            for port, role in port_roles.items()
+            if str(role).strip()
+        }
 
     def _resolve_node(self, node_id: str) -> Optional[IrrigapNode]:
         if self._node_resolver is not None:
@@ -138,6 +181,26 @@ class IrrigapChirpStackParser:
             and "fPort" in payload
         )
 
+    @staticmethod
+    def _message_role(values: Mapping[str, str]) -> str:
+        if any(key in values for key in ("VB", "BT")):
+            return "battery"
+        if any(
+            key.startswith(prefix)
+            for key in values
+            for prefix in ("M", "T", "C")
+        ):
+            return "soil"
+        return "unknown"
+
+    def _port_role(self, f_port: int, node: Optional[IrrigapNode]) -> str:
+        explicit = self._port_roles.get(int(f_port))
+        if explicit:
+            return explicit
+        if node is not None and int(f_port) in node.depths:
+            return "soil"
+        return "unknown"
+
     def parse(self, event: RawEvent) -> Optional[ParsedEvent]:
         try:
             envelope = json.loads(event.payload.decode("utf-8"))
@@ -156,27 +219,6 @@ class IrrigapChirpStackParser:
         if not node_id:
             return None
 
-        moisture_raw = _first_numeric(values, "M")
-        temperature = _first_numeric(values, "T")
-        ec_raw = _first_numeric(values, "C")
-
-        pieces = raw_text.split("|")
-        if moisture_raw is None and len(pieces) > 5:
-            try:
-                moisture_raw = float(pieces[5])
-            except ValueError:
-                pass
-        if temperature is None and len(pieces) > 7:
-            try:
-                temperature = float(pieces[7])
-            except ValueError:
-                pass
-        if ec_raw is None and len(pieces) > 9:
-            try:
-                ec_raw = float(pieces[9])
-            except ValueError:
-                pass
-
         device_info = envelope.get("deviceInfo") or {}
         device_name = str(device_info.get("deviceName") or node_id).strip()
         if not device_name:
@@ -189,65 +231,100 @@ class IrrigapChirpStackParser:
 
         node = self._resolve_node(node_id)
         timestamp = _iso_epoch(envelope.get("time")) or event.received_at
+        message_role = self._message_role(values)
+        port_role = self._port_role(f_port, node)
 
-        moisture_invalid = moisture_raw is not None and moisture_raw < 0.0
-        ec_invalid = ec_raw is not None and ec_raw < 0.0
-        packet_sentinel = bool(
-            moisture_invalid
-            and ec_invalid
-            and temperature is not None
-            and temperature == -1.0
-        )
+        measurements: list[Measurement] = []
 
-        measurements = []
-        if moisture_raw is not None:
-            if not moisture_invalid:
+        if message_role == "battery":
+            voltage = _exact_numeric(values, "VB")
+            level = _exact_numeric(values, "BT")
+            if voltage is not None:
                 measurements.append(
                     Measurement(
-                        name="soil.moisture",
-                        value=_greenstick_vwc(node_id, moisture_raw),
-                        unit="%",
+                        name="battery.voltage",
+                        value=voltage,
+                        unit="V",
                         timestamp=timestamp,
+                        metadata=_invalid_source("battery_voltage") if voltage < 0 else {},
                     )
                 )
-            measurements.append(
-                Measurement(
-                    name="soil.raw.moisture_m1",
-                    value=moisture_raw,
-                    unit="mV",
-                    timestamp=timestamp,
-                    metadata=_invalid_source("moisture") if moisture_invalid else {},
+            if level is not None:
+                measurements.append(
+                    Measurement(
+                        name="battery.level",
+                        value=level,
+                        unit="%",
+                        timestamp=timestamp,
+                        metadata=_invalid_source("battery_level") if level < 0 else {},
+                    )
                 )
+        elif message_role == "soil":
+            moisture_raw = _first_numeric(values, "M")
+            temperature = _first_numeric(values, "T")
+            ec_raw = _first_numeric(values, "C")
+
+            moisture_invalid = moisture_raw is not None and moisture_raw < 0.0
+            ec_invalid = ec_raw is not None and ec_raw < 0.0
+            packet_sentinel = bool(
+                moisture_invalid
+                and ec_invalid
+                and temperature is not None
+                and temperature == -1.0
             )
-        if temperature is not None:
-            measurements.append(
-                Measurement(
-                    name="soil.temperature",
-                    value=temperature,
-                    unit="Cel",
-                    timestamp=timestamp,
-                    metadata=_invalid_source("temperature") if packet_sentinel else {},
+
+            if moisture_raw is not None:
+                if not moisture_invalid:
+                    # Greenstick calibration is only valid for Greenstick. For
+                    # Teros12 we preserve the raw reading until a family-specific
+                    # calibration is explicitly configured/validated.
+                    if node is not None and str(node.device).strip().lower() == "greenstick":
+                        measurements.append(
+                            Measurement(
+                                name="soil.moisture",
+                                value=_greenstick_vwc(node_id, moisture_raw),
+                                unit="%",
+                                timestamp=timestamp,
+                            )
+                        )
+                measurements.append(
+                    Measurement(
+                        name="soil.raw.moisture_m1",
+                        value=moisture_raw,
+                        unit="mV",
+                        timestamp=timestamp,
+                        metadata=_invalid_source("moisture") if moisture_invalid else {},
+                    )
                 )
-            )
-        if ec_raw is not None:
-            ec_metadata = _invalid_source("electrical_conductivity") if ec_invalid else {}
-            measurements.append(
-                Measurement(
-                    name="soil.electrical_conductivity",
-                    value=ec_raw,
-                    timestamp=timestamp,
-                    metadata=ec_metadata,
+            if temperature is not None:
+                measurements.append(
+                    Measurement(
+                        name="soil.temperature",
+                        value=temperature,
+                        unit="Cel",
+                        timestamp=timestamp,
+                        metadata=_invalid_source("temperature") if packet_sentinel else {},
+                    )
                 )
-            )
-            measurements.append(
-                Measurement(
-                    name="soil.raw.ec_c1",
-                    value=ec_raw,
-                    unit="mV",
-                    timestamp=timestamp,
-                    metadata=ec_metadata,
+            if ec_raw is not None:
+                ec_metadata = _invalid_source("electrical_conductivity") if ec_invalid else {}
+                measurements.append(
+                    Measurement(
+                        name="soil.electrical_conductivity",
+                        value=ec_raw,
+                        timestamp=timestamp,
+                        metadata=ec_metadata,
+                    )
                 )
-            )
+                measurements.append(
+                    Measurement(
+                        name="soil.raw.ec_c1",
+                        value=ec_raw,
+                        unit="mV",
+                        timestamp=timestamp,
+                        metadata=ec_metadata,
+                    )
+                )
 
         if not measurements:
             return None
@@ -255,17 +332,31 @@ class IrrigapChirpStackParser:
         metadata: Dict[str, Any] = {
             "source": event.source,
             "topic": event.topic,
+            "transport": {
+                "type": "chirpstack",
+                "mqtt_topic": event.topic,
+                "f_port": f_port,
+                "application_id": str(device_info.get("applicationId") or ""),
+                "port_role": port_role,
+            },
             "sensor": node.device if node else "irrigap",
             "device_id": device_name,
             "node_id": node_id,
             "f_port": f_port,
+            "message_role": message_role,
+            "port_role": port_role,
             "bt": timestamp,
             "status": "on-line",
             "raw_ultralight": raw_text,
+            "gateway_rx": _normalized_rx_info(envelope),
         }
+        if port_role != "unknown" and message_role != "unknown" and port_role != message_role:
+            metadata["port_role_mismatch"] = True
         topic_parts = [part for part in event.topic.split("/") if part]
         if len(topic_parts) >= 2 and topic_parts[0] == "application":
             metadata["application_id"] = topic_parts[1]
+        elif device_info.get("applicationId"):
+            metadata["application_id"] = str(device_info.get("applicationId"))
         if node is not None:
             if node.location:
                 metadata["location"] = node.location
@@ -283,6 +374,7 @@ class IrrigapChirpStackParser:
 
 
 __all__ = [
+    "DEFAULT_PORT_ROLES",
     "IrrigapChirpStackParser",
     "IrrigapNode",
     "NodeResolver",
