@@ -68,7 +68,25 @@ class TimescaleHistoryProvider:
         self.max_series = max(int(max_series), 1)
 
     @staticmethod
-    def _time(item: Mapping[str, Any]) -> Optional[float]:
+    def _epoch_seconds(value: float) -> float:
+        """Normalize common Unix epoch units to seconds.
+
+        Magistrala's Timescale reader currently returns message ``time`` in
+        nanoseconds, while parsed SMA events use Unix seconds. Accept seconds,
+        milliseconds, microseconds and nanoseconds so trend duration/slope use
+        one unit even if the reader representation changes.
+        """
+        magnitude = abs(value)
+        if magnitude >= 1.0e17:  # nanoseconds, e.g. 1.789e18
+            return value / 1.0e9
+        if magnitude >= 1.0e14:  # microseconds
+            return value / 1.0e6
+        if magnitude >= 1.0e11:  # milliseconds
+            return value / 1.0e3
+        return value
+
+    @classmethod
+    def _time(cls, item: Mapping[str, Any]) -> Optional[float]:
         for key in ("time", "timestamp", "bt"):
             raw = item.get(key)
             if isinstance(raw, bool) or raw is None:
@@ -78,8 +96,17 @@ class TimescaleHistoryProvider:
             except (TypeError, ValueError):
                 continue
             if math.isfinite(value):
-                return value
+                return cls._epoch_seconds(value)
         return None
+
+    @staticmethod
+    def _measurement_name(raw_name: object, external_id: str = "") -> str:
+        """Remove the SenML base-name/device prefix from persisted names."""
+        name = str(raw_name or "").strip()
+        prefix = str(external_id or "").strip()
+        if prefix and name.startswith(prefix + ":"):
+            return name[len(prefix) + 1 :]
+        return name
 
     @staticmethod
     def _numeric(item: Mapping[str, Any]) -> Optional[float]:
@@ -153,13 +180,14 @@ class TimescaleHistoryProvider:
         messages: Iterable[Mapping[str, Any]],
         *,
         total: Optional[int] = None,
+        external_id: str = "",
     ) -> dict[str, Any]:
         rows = [dict(item) for item in messages if isinstance(item, Mapping)]
         grouped: dict[str, list[tuple[float, float, Optional[str]]]] = {}
         quality_counts = {"valid": 0, "degraded": 0, "invalid": 0, "unknown": 0}
 
         for item in rows:
-            name = str(item.get("name") or "").strip()
+            name = self._measurement_name(item.get("name"), external_id)
             if not name:
                 continue
             if name == "sensor.data_quality":
@@ -200,11 +228,7 @@ class TimescaleHistoryProvider:
         series.sort(key=lambda item: (".raw." in item.name, item.name))
         series = series[: self.max_series]
 
-        times = [
-            ts
-            for values in grouped.values()
-            for ts, _, _ in values
-        ]
+        times = [ts for values in grouped.values() for ts, _, _ in values]
         return {
             "status": "available",
             "source": "magistrala-timescale",
@@ -224,16 +248,21 @@ class TimescaleHistoryProvider:
 
     def build(self, result, *, workspace_id: str, channel_id: str) -> dict[str, Any]:
         try:
+            external_id = result.parsed_event.external_device_id
             page = self.reader.list_device_messages(
                 workspace_id,
                 channel_id,
-                result.parsed_event.external_device_id,
+                external_id,
                 limit=self.limit,
                 offset=0,
                 order="time",
                 direction="desc",
             )
-            return self.summarize_messages(page.messages, total=page.total)
+            return self.summarize_messages(
+                page.messages,
+                total=page.total,
+                external_id=external_id,
+            )
         except Exception as exc:
             # History is optional intelligence context. Reader failures must not
             # propagate into the primary telemetry delivery path.
