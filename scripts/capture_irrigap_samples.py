@@ -32,10 +32,6 @@ def _env(name: str, default: str = "") -> str:
     return str(os.getenv(name, default)).strip()
 
 
-def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def _safe_decode(data_b64: Any) -> tuple[str | None, str | None, str | None]:
     if not isinstance(data_b64, str) or not data_b64:
         return None, None, None
@@ -79,11 +75,44 @@ def _client(client_id: str):
     return mqtt.Client(**kwargs)
 
 
+def _connect_failed(reason_code: Any) -> bool:
+    """Handle both Paho 1 integer rc and Paho 2 ReasonCode objects."""
+    is_failure = getattr(reason_code, "is_failure", None)
+    if isinstance(is_failure, bool):
+        return is_failure
+    value = getattr(reason_code, "value", reason_code)
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return str(reason_code).strip().lower() not in {"0", "success"}
+
+
+def _topic_parts(topic: str) -> dict[str, Any]:
+    """Extract common ChirpStack topic coordinates without assuming event/up."""
+    parts = [part for part in str(topic).split("/") if part]
+    result: dict[str, Any] = {
+        "topic_root": parts[0] if parts else None,
+        "topic_event": None,
+        "topic_application_id": None,
+        "topic_device_id": None,
+    }
+    if len(parts) >= 2 and parts[0] == "application":
+        result["topic_application_id"] = parts[1]
+    if len(parts) >= 4 and parts[2] == "device":
+        result["topic_device_id"] = parts[3]
+    if "event" in parts:
+        index = parts.index("event")
+        if index + 1 < len(parts):
+            result["topic_event"] = parts[index + 1]
+    return result
+
+
 def parse_args() -> argparse.Namespace:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     parser = argparse.ArgumentParser(
         description=(
-            "Passively capture ChirpStack telemetry samples as JSONL for parser/calibration analysis."
+            "Passively capture MQTT/ChirpStack samples as JSONL for parser, calibration, "
+            "inventory and traffic analysis."
         )
     )
     parser.add_argument("--broker", default=_env("SMA_MQTT_HOST", "189.18.9.13"))
@@ -93,6 +122,11 @@ def parse_args() -> argparse.Namespace:
         "--topic",
         default="",
         help="MQTT topic override. Default: application/<app-id>/device/+/event/up",
+    )
+    parser.add_argument(
+        "--all-topics",
+        action="store_true",
+        help="Subscribe to # for passive broker inventory/overnight capture.",
     )
     parser.add_argument("--qos", type=int, choices=(0, 1, 2), default=0)
     parser.add_argument("--username", default=_env("SMA_MQTT_USERNAME"))
@@ -135,7 +169,15 @@ def main() -> int:
         return 2
 
     args = parse_args()
-    topic = args.topic.strip() or f"application/{args.app_id}/device/+/event/up"
+    if args.all_topics and args.topic.strip():
+        print("ERROR: use either --all-topics or --topic, not both", file=sys.stderr)
+        return 2
+
+    if args.all_topics:
+        topic = "#"
+    else:
+        topic = args.topic.strip() or f"application/{args.app_id}/device/+/event/up"
+
     output = Path(args.output).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -145,6 +187,8 @@ def main() -> int:
     counter = 0
     devices: Counter[str] = Counter()
     ports: Counter[str] = Counter()
+    topics: Counter[str] = Counter()
+    events: Counter[str] = Counter()
     decode_failures = 0
     json_failures = 0
     started = time.time()
@@ -162,12 +206,15 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
-        rc = int(reason_code)
-        if rc != 0:
-            print(f"ERROR MQTT connect rc={rc}", file=sys.stderr, flush=True)
+        if _connect_failed(reason_code):
+            print(
+                f"ERROR MQTT connect reason={reason_code}",
+                file=sys.stderr,
+                flush=True,
+            )
             stop.set()
             return
-        result, mid = client.subscribe(topic, qos=args.qos)
+        result, _mid = client.subscribe(topic, qos=args.qos)
         if result != mqtt.MQTT_ERR_SUCCESS:
             print(f"ERROR MQTT subscribe rc={result}", file=sys.stderr, flush=True)
             stop.set()
@@ -180,6 +227,8 @@ def main() -> int:
         print(f"OUTPUT    {output}", flush=True)
         if wanted_devices:
             print("FILTER    devices=" + ",".join(sorted(wanted_devices)), flush=True)
+        if args.all_topics:
+            print("MODE      passive all-topic broker inventory", flush=True)
         print("STOP      Ctrl+C", flush=True)
 
     def on_disconnect(client, userdata, *callback_args):
@@ -189,6 +238,7 @@ def main() -> int:
     def on_message(client, userdata, msg):
         nonlocal counter, decode_failures, json_failures
         received_at = time.time()
+        topic_meta = _topic_parts(msg.topic)
         try:
             envelope = json.loads(msg.payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -208,12 +258,13 @@ def main() -> int:
                 decode_failures += 1
             f_port = envelope.get("fPort")
             record = {
-                "capture_schema": "smarter-adapter.chirpstack-sample/1",
+                "capture_schema": "smarter-adapter.mqtt-sample/2",
                 "received_at": received_at,
                 "received_at_utc": datetime.fromtimestamp(received_at, timezone.utc)
                 .isoformat()
                 .replace("+00:00", "Z"),
                 "topic": msg.topic,
+                **topic_meta,
                 "mqtt_qos": int(msg.qos),
                 "mqtt_retain": bool(msg.retain),
                 "chirpstack_time": envelope.get("time"),
@@ -235,12 +286,13 @@ def main() -> int:
             device_name = ""
             f_port = None
             record = {
-                "capture_schema": "smarter-adapter.chirpstack-sample/1",
+                "capture_schema": "smarter-adapter.mqtt-sample/2",
                 "received_at": received_at,
                 "received_at_utc": datetime.fromtimestamp(received_at, timezone.utc)
                 .isoformat()
                 .replace("+00:00", "Z"),
                 "topic": msg.topic,
+                **topic_meta,
                 "mqtt_qos": int(msg.qos),
                 "mqtt_retain": bool(msg.retain),
                 "payload_utf8": msg.payload.decode("utf-8", errors="replace"),
@@ -253,13 +305,16 @@ def main() -> int:
         counter += 1
         devices[device_name or "<unknown>"] += 1
         ports[str(f_port) if f_port is not None else "<none>"] += 1
+        topics[msg.topic] += 1
+        events[str(topic_meta.get("topic_event") or "<other>")] += 1
 
         decoded_preview = record.get("data_decoded_utf8")
         if decoded_preview is None:
-            decoded_preview = record.get("parse_error", "binary")
+            decoded_preview = record.get("parse_error") or record.get("topic_event") or "json"
         print(
-            f"[{counter:05d}] device={device_name or '<unknown>'} "
-            f"fPort={f_port} data={str(decoded_preview)[:140]}",
+            f"[{counter:05d}] event={topic_meta.get('topic_event') or '<other>'} "
+            f"device={device_name or '<unknown>'} fPort={f_port} "
+            f"topic={msg.topic} data={str(decoded_preview)[:120]}",
             flush=True,
         )
 
@@ -304,6 +359,12 @@ def main() -> int:
         print("DEVICES   " + " ".join(f"{name}={count}" for name, count in devices.most_common()))
     if ports:
         print("PORTS     " + " ".join(f"{port}={count}" for port, count in ports.most_common()))
+    if events:
+        print("EVENTS    " + " ".join(f"{event}={count}" for event, count in events.most_common()))
+    if topics:
+        print(f"TOPICS    unique={len(topics)}")
+        for name, count in topics.most_common(20):
+            print(f"          {count:6d} {name}")
     print(f"SAVED     {output}")
     return 0
 
