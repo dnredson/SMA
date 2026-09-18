@@ -24,6 +24,7 @@ def render_prometheus_metrics(status: Mapping[str, Any], *, ready: bool) -> str:
     service = dict(status.get("service") or {})
     queues = dict(status.get("queues") or {})
     devices = dict(status.get("devices") or {})
+    gateways = dict(status.get("gateways") or {})
     quality = dict(status.get("quality") or {})
     catalog = dict(status.get("catalog") or {})
     runtime = dict(status.get("runtime") or {})
@@ -75,6 +76,29 @@ def render_prometheus_metrics(status: Mapping[str, Any], *, ready: bool) -> str:
     )
     for state in ("online", "stale", "offline"):
         lines.append(f'sma_devices{{status="{state}"}} {_num(devices.get(state, 0))}')
+
+    lines.extend(
+        [
+            "# HELP sma_gateways Observed LoRaWAN gateways by operational presence state.",
+            "# TYPE sma_gateways gauge",
+        ]
+    )
+    for state in ("online", "stale", "offline"):
+        lines.append(f'sma_gateways{{status="{state}"}} {_num(gateways.get(state, 0))}')
+
+    lines.extend(
+        [
+            "# HELP sma_gateway_expected_interval_seconds Expected gateway stats/heartbeat interval.",
+            "# TYPE sma_gateway_expected_interval_seconds gauge",
+            f"sma_gateway_expected_interval_seconds {_num(gateways.get('expected_interval_seconds', 0))}",
+            "# HELP sma_gateway_stale_after_seconds Gateway stale threshold.",
+            "# TYPE sma_gateway_stale_after_seconds gauge",
+            f"sma_gateway_stale_after_seconds {_num(gateways.get('stale_after_seconds', 0))}",
+            "# HELP sma_gateway_offline_after_seconds Gateway offline threshold.",
+            "# TYPE sma_gateway_offline_after_seconds gauge",
+            f"sma_gateway_offline_after_seconds {_num(gateways.get('offline_after_seconds', 0))}",
+        ]
+    )
 
     lines.extend(
         [
