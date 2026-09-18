@@ -4,19 +4,23 @@ SmartAdapter consumes sensor messages over MQTT, keeps the existing sensor
 parsers, normalizes their measurements to SenML JSON, and publishes them to
 Magistrala through the current Atom-backed FluxMQ HTTP API.
 
+The v2 runtime also manages persistent device mappings and lifecycle state,
+Atom profiles/policies, retry/DLQ, data quality, presence, MQTT alerts, and
+provider-neutral LLM context with optional Timescale history/trends.
+
 ## Magistrala / Atom integration
 
 The adapter no longer uses the removed `users`, `domains`, `clients` or
 `magistrala-cli` management APIs. Atom is accessed through GraphQL at
-`POST <ATOM_URL>/graphql` with a bearer token. The adapter treats a sensor as
-an Atom entity with `kind = "device"` and its normalized topic as
-`externalId`.
+`POST <ATOM_URL>/graphql` with a bearer token or configured service account.
+The adapter treats a sensor as an Atom entity with `kind = "device"` and its
+normalized identity as `externalId`.
 
 Telemetry is published with:
 
 ```text
 POST /<tenant_id>/channels/<channel_id>/messages
-Authorization: Bearer <ATOM_SERVICE_TOKEN>
+Authorization: Bearer <ATOM token>
 Content-Type: application/json
 ```
 
@@ -30,33 +34,82 @@ The JSON body is the FluxMQ HTTP envelope:
 }
 ```
 
-On first observation, the registry creates the Atom device and, when
-`atom_manage_policies = true`, grants it `publish` on the configured channel
-using Atom's permission-block/direct-policy mutations. The local state stores
-only the Atom device ID and lifecycle metadata; it does not store a device
-secret.
+On first observation, SMA can create/reconcile the Atom device, typed profile,
+and direct `publish` policy for the configured channel. Local SQLite state
+keeps durable mappings, lifecycle/retry/DLQ/quality metadata and does not store
+a per-device secret.
 
-## Configuration
+## Quick start / deployment configuration
 
-Copy `config.example.toml` and provide `ATOM_SERVICE_TOKEN` (or
-`ATOM_ADMIN_TOKEN`) in the environment. Set `atom_tenant_id` and
-`atom_channel_id` to the Atom tenant and channel used by the testbed.
+Create the Python environment and install the project dependencies as usual,
+then create a local runtime configuration from the tracked template:
 
-The CRUD API listens on `127.0.0.1:8081` by default:
-
-```text
-GET    /health
-GET    /api/v1/devices
-POST   /api/v1/devices
-GET    /api/v1/devices/<atom-device-id>
-PATCH  /api/v1/devices/<atom-device-id>
-DELETE /api/v1/devices/<atom-device-id>
+```bash
+cp .env.example .env
+chmod 600 .env
+$EDITOR .env
 ```
 
-Set `api_token` or `ADAPTER_API_TOKEN` to require `Authorization: Bearer ...`.
+`.env.example` is safe to commit and documents the supported runtime variables.
+The real `.env` is intentionally ignored by Git and must contain deployment
+credentials only on the target machine.
+
+The recommended v2 entry point is:
+
+```bash
+source .venv/bin/activate
+python scripts/run_v2.py
+```
+
+`run_v2.py` loads the repository-root `.env` automatically. Configuration
+precedence is:
+
+```text
+shell / systemd environment > .env > code defaults
+```
+
+This makes local development convenient while still allowing production
+service managers, containers, or secret injection to override individual
+values without modifying the file.
+
+Important groups in `.env.example` include:
+
+- Magistrala/Atom connection and authentication
+- sensor MQTT input
+- Management API bearer token
+- persistent retry/DLQ policy
+- MQTT alert side-channel
+- LLM-context side-channel
+- Timescale history/trend settings
+- presence thresholds
+
+For another deployment, replace the Irrigap broker/topic/catalog values rather
+than committing site-specific credentials.
+
+## Management API
+
+The v2 Management API listens on `127.0.0.1:8082` by default. Main endpoints
+include:
+
+```text
+GET  /health
+GET  /ready
+GET  /metrics
+GET  /api/v2/status
+GET  /api/v2/devices
+GET  /api/v2/retry
+GET  /api/v2/dlq
+POST /api/v2/reconcile
+GET  /api/v2/catalog/devices
+```
+
+Additional catalog lifecycle and per-device telemetry endpoints are available
+under `/api/v2`. Set `SMA_API_TOKEN` to require `Authorization: Bearer ...` for
+protected routes.
 
 ## Run tests
 
 ```bash
+source .venv/bin/activate
 python -m unittest discover -s tests -v
 ```
