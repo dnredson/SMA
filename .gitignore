@@ -17,6 +17,9 @@ config.local.toml
 *.sqlite
 *.sqlite3
 
+# Passive field captures (can contain deployment/device identifiers)
+captures/
+
 # Node/Build (se houver)
 node_modules/
 dist/
