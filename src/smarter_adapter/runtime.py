@@ -64,6 +64,9 @@ def _device_attributes(event: ParsedEvent) -> dict:
 
 
 def _observation_metadata(event: ParsedEvent) -> dict:
+    # Observation state deliberately keeps transport provenance separate from
+    # Atom entity attributes. fPort/topic/message role describe a particular
+    # ingress frame and may change during the lifetime of one physical sensor.
     allowed = (
         "sensor",
         "node_id",
@@ -73,6 +76,14 @@ def _observation_metadata(event: ParsedEvent) -> dict:
         "application_id",
         "f_port",
         "bt",
+        "source",
+        "topic",
+        "transport",
+        "message_role",
+        "port_role",
+        "port_role_mismatch",
+        "raw_ultralight",
+        "gateway_rx",
     )
     return {key: event.metadata[key] for key in allowed if key in event.metadata}
 
@@ -252,6 +263,31 @@ class SmarterAdapterRuntime:
             observed_at=raw.received_at,
         )
 
+    def _record_gateway_observations(
+        self,
+        base: BaseResources,
+        parsed: ParsedEvent,
+        raw: RawEvent,
+    ) -> None:
+        if self.state_store is None:
+            return
+        setter = getattr(self.state_store, "record_device_gateway", None)
+        if not callable(setter):
+            return
+        items = parsed.metadata.get("gateway_rx") or []
+        if not isinstance(items, (list, tuple)):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            setter(
+                base.workspace.id,
+                base.channel.id,
+                parsed.external_device_id,
+                item,
+                observed_at=raw.received_at,
+            )
+
     def _remote_device(
         self,
         base: BaseResources,
@@ -322,15 +358,34 @@ class SmarterAdapterRuntime:
         setter = getattr(self.state_store, "set_device_quality", None)
         if not callable(setter):
             return
-        setter(
-            base.workspace.id,
-            base.channel.id,
-            parsed.external_device_id,
-            quality_status=status,
-            invalid_fields=_quality_invalid_fields(issues),
-            evaluated_at=time.time(),
-            source_received_at=raw.received_at,
-        )
+        kwargs = {
+            "quality_status": status,
+            "invalid_fields": _quality_invalid_fields(issues),
+            "evaluated_at": time.time(),
+            "source_received_at": raw.received_at,
+        }
+        role = str(parsed.metadata.get("message_role") or "").strip().lower()
+        if role and role != "unknown":
+            kwargs["role"] = role
+        try:
+            setter(
+                base.workspace.id,
+                base.channel.id,
+                parsed.external_device_id,
+                **kwargs,
+            )
+        except TypeError as exc:
+            # Backward compatibility for custom state stores that implement the
+            # pre-role quality setter. Production storage accepts ``role``.
+            if "role" not in kwargs or "role" not in str(exc):
+                raise
+            kwargs.pop("role", None)
+            setter(
+                base.workspace.id,
+                base.channel.id,
+                parsed.external_device_id,
+                **kwargs,
+            )
 
     def process(self, raw: RawEvent) -> ProcessResult:
         outcome = self.pipeline.process(raw)
@@ -375,6 +430,7 @@ class SmarterAdapterRuntime:
                 seen_at=raw.received_at,
             )
             self._record_managed_observation(base, parsed, raw)
+            self._record_gateway_observations(base, parsed, raw)
             self._record_quality(
                 base,
                 parsed,
