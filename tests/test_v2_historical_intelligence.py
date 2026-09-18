@@ -97,6 +97,42 @@ class HistoricalIntelligenceTests(unittest.TestCase):
         temperature = next(item for item in history["series"] if item["name"] == "soil.temperature")
         self.assertEqual(temperature["direction"], "insufficient")
 
+    def test_timescale_nanoseconds_and_senml_device_prefix_are_normalized(self):
+        external_id = "teros12-sector1.3"
+        reader = _Reader(
+            [
+                {
+                    "name": external_id + ":soil.moisture",
+                    "value": 20.0,
+                    "unit": "%",
+                    "time": 1_789_675_729_000_000_000,
+                },
+                {
+                    "name": external_id + ":soil.moisture",
+                    "value": 24.0,
+                    "unit": "%",
+                    "time": 1_789_679_329_000_000_000,
+                },
+                {
+                    "name": external_id + ":sensor.data_quality",
+                    "string_value": "valid",
+                    "time": 1_789_679_329_000_000_000,
+                },
+            ]
+        )
+        provider = TimescaleHistoryProvider(reader)
+        history = provider.build(_result(), workspace_id="ws-1", channel_id="ch-1")
+
+        self.assertEqual(history["coverage"]["first_at"], 1_789_675_729.0)
+        self.assertEqual(history["coverage"]["last_at"], 1_789_679_329.0)
+        self.assertEqual(history["quality_counts"]["valid"], 1)
+        self.assertEqual(len(history["series"]), 1)
+        moisture = history["series"][0]
+        self.assertEqual(moisture["name"], "soil.moisture")
+        self.assertEqual(moisture["duration_seconds"], 3600.0)
+        self.assertEqual(moisture["slope_per_hour"], 4.0)
+        self.assertEqual(moisture["direction"], "increasing")
+
     def test_history_reader_failure_becomes_unavailable_context_not_exception(self):
         reader = _Reader([], error=ReaderError("reader down"))
         provider = TimescaleHistoryProvider(reader)
