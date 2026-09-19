@@ -84,6 +84,7 @@ def _observation_metadata(event: ParsedEvent) -> dict:
         "port_role_mismatch",
         "raw_ultralight",
         "gateway_rx",
+        "rf_tx",
     )
     return {key: event.metadata[key] for key in allowed if key in event.metadata}
 
@@ -291,13 +292,17 @@ class SmarterAdapterRuntime:
             or raw.topic
             or ""
         )
+        rf_tx = parsed.metadata.get("rf_tx")
+        if not isinstance(rf_tx, dict):
+            rf_tx = {}
 
         for item in items:
             if not isinstance(item, dict):
                 continue
-            # rxInfo owns radio observations (RSSI/SNR/channel). Frame-level
-            # provenance lives beside rxInfo in ParsedEvent metadata, so enrich
-            # the link sample at the runtime boundary before persistence.
+            # rxInfo owns per-gateway observations (RSSI/SNR/channel), while
+            # txInfo owns frame-level LoRa parameters shared by all receptions.
+            # Frame provenance lives beside both, so merge them only at the RF
+            # persistence boundary rather than coupling sensor parsers to storage.
             enriched = dict(item)
             if f_port is not None:
                 enriched.setdefault("f_port", f_port)
@@ -305,6 +310,16 @@ class SmarterAdapterRuntime:
                 enriched.setdefault("message_role", message_role)
             if mqtt_topic:
                 enriched.setdefault("mqtt_topic", mqtt_topic)
+            for key in (
+                "frequency_hz",
+                "modulation",
+                "spreading_factor",
+                "bandwidth_hz",
+                "code_rate",
+                "bitrate_bps",
+            ):
+                if key in rf_tx and rf_tx[key] not in (None, ""):
+                    enriched.setdefault(key, rf_tx[key])
             setter(
                 base.workspace.id,
                 base.channel.id,
