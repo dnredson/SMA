@@ -30,22 +30,41 @@ class RFHealthTests(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def _record(self, at: float, rssi: float, snr: float, *, channel: int = 5):
+    def _record(
+        self,
+        at: float,
+        rssi: float,
+        snr: float,
+        *,
+        channel: int = 5,
+        radio: bool = False,
+    ):
+        sample = {
+            "gateway_id": self.gateway_id,
+            "rssi": rssi,
+            "snr": snr,
+            "channel": channel,
+            "rf_chain": 1,
+            "crc_status": "CRC_OK",
+            "f_port": 31,
+            "message_role": "soil",
+            "mqtt_topic": "application/app/device/eui/event/up",
+        }
+        if radio:
+            sample.update(
+                {
+                    "frequency_hz": 903300000,
+                    "modulation": "lora",
+                    "spreading_factor": 10,
+                    "bandwidth_hz": 125000,
+                    "code_rate": "CR_4_5",
+                }
+            )
         self.store.record_device_gateway(
             self.workspace,
             self.channel,
             self.external_id,
-            {
-                "gateway_id": self.gateway_id,
-                "rssi": rssi,
-                "snr": snr,
-                "channel": channel,
-                "rf_chain": 1,
-                "crc_status": "CRC_OK",
-                "f_port": 31,
-                "message_role": "soil",
-                "mqtt_topic": "application/app/device/eui/event/up",
-            },
+            sample,
             observed_at=at,
         )
 
@@ -100,6 +119,7 @@ class RFHealthTests(unittest.TestCase):
         self.assertAlmostEqual(gateway["snr"]["slope_db_per_hour"], -2.0)
         self.assertEqual(gateway["channels"], [5])
         self.assertEqual(gateway["message_roles"], ["soil"])
+        self.assertEqual(gateway["assessment"]["status"], "comparable")
 
     def test_latest_topology_link_is_enriched_with_rf_summary(self):
         now = time.time()
@@ -117,6 +137,55 @@ class RFHealthTests(unittest.TestCase):
         self.assertEqual(health["samples"], 3)
         self.assertEqual(health["rssi"]["trend"], "improving")
         self.assertEqual(health["snr"]["trend"], "improving")
+
+    def test_lora_radio_profile_is_persisted_and_reported(self):
+        self._record(1000.0, -61.0, 9.8, radio=True)
+        samples = self.store.list_rf_samples(
+            self.workspace,
+            self.channel,
+            self.external_id,
+            limit=10,
+        )
+        self.assertEqual(samples[0]["frequency_hz"], 903300000)
+        self.assertEqual(samples[0]["modulation"], "lora")
+        self.assertEqual(samples[0]["spreading_factor"], 10)
+        self.assertEqual(samples[0]["bandwidth_hz"], 125000)
+        self.assertEqual(samples[0]["code_rate"], "CR_4_5")
+
+        report = self.store.rf_health_report(
+            self.workspace,
+            self.channel,
+            self.external_id,
+            window_hours=1,
+            now=1000.0,
+        )
+        profile = report["gateways"][0]["by_radio_profile"][0]["profile"]
+        self.assertEqual(profile["frequency_hz"], 903300000)
+        self.assertEqual(profile["spreading_factor"], 10)
+
+    def test_mixed_channels_without_radio_profile_do_not_become_health_verdict(self):
+        self._record(1000.0, -60.0, 10.0, channel=1)
+        self._record(4600.0, -70.0, 8.0, channel=2)
+        self._record(8200.0, -80.0, 6.0, channel=3)
+        report = self.store.rf_health_report(
+            self.workspace,
+            self.channel,
+            self.external_id,
+            window_hours=3,
+            now=8200.0,
+        )
+        gateway = report["gateways"][0]
+        # The raw aggregate regression remains useful diagnostically...
+        self.assertEqual(gateway["rssi"]["trend"], "degrading")
+        # ...but the health assessment refuses to compare different channels
+        # as if they were one identical radio condition.
+        self.assertEqual(gateway["assessment"]["status"], "mixed_conditions")
+        self.assertFalse(gateway["assessment"]["comparable"])
+        self.assertEqual(
+            gateway["assessment"]["reason"],
+            "multiple_channels_without_radio_profile",
+        )
+        self.assertEqual(len(gateway["by_channel"]), 3)
 
 
 if __name__ == "__main__":
