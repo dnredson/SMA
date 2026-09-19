@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -275,15 +276,25 @@ class DecommissionLifecycleTests(unittest.TestCase):
             [config],
             input_factory=_Input,
             reliability_store=self.store,
+            ingress_poll_interval_seconds=0.01,
         )
-        service._handle_event(
-            RawEvent(source="mqtt:test", payload=b"{}", received_at=100.0)
-        )
-        self.assertEqual(service.stats.received, 1)
-        self.assertEqual(service.stats.suppressed, 1)
-        self.assertEqual(service.stats.failed, 0)
-        self.assertEqual(service.stats.dead_lettered, 0)
-        self.assertEqual(self.store.count_dlq(), 0)
+        service.start()
+        try:
+            service._handle_event(
+                RawEvent(source="mqtt:test", payload=b"{}", received_at=100.0)
+            )
+            deadline = time.time() + 1.0
+            while service.stats.suppressed < 1 and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(service.stats.received, 1)
+            self.assertEqual(service.stats.ingressed, 1)
+            self.assertEqual(service.stats.suppressed, 1)
+            self.assertEqual(service.stats.failed, 0)
+            self.assertEqual(service.stats.dead_lettered, 0)
+            self.assertEqual(self.store.count_ingress(), 0)
+            self.assertEqual(self.store.count_dlq(), 0)
+        finally:
+            service.stop()
 
     def test_atom_revoke_deletes_only_matching_publish_policy(self):
         client = LifecycleAtomClient(AtomConfig(base_url="http://atom", token="token"))
