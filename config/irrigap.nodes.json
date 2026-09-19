@@ -1,0 +1,81 @@
+{
+  "nodes": [
+    {
+      "id": "3303",
+      "device": "greenstick",
+      "location": "Sector_3",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm", "32": "35cm", "33": "55cm"}
+    },
+    {
+      "id": "3304",
+      "device": "greenstick",
+      "location": "Sector_4",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm", "32": "35cm", "33": "55cm"}
+    },
+    {
+      "id": "3306",
+      "device": "greenstick",
+      "location": "Sector_6",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm", "32": "35cm", "33": "55cm"}
+    },
+    {
+      "id": "3307",
+      "device": "greenstick",
+      "location": "Sector_7",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm", "32": "35cm", "33": "55cm"}
+    },
+    {
+      "id": "2303",
+      "device": "teros12",
+      "location": "Sector_3",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm"}
+    },
+    {
+      "id": "2304",
+      "device": "teros12",
+      "location": "Sector_4",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm"}
+    },
+    {
+      "id": "2305",
+      "device": "teros12",
+      "location": "Sector_5",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm"}
+    },
+    {
+      "id": "2306",
+      "device": "teros12",
+      "location": "Sector_6",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm"}
+    },
+    {
+      "id": "2307",
+      "device": "teros12",
+      "location": "Sector_7",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm"}
+    },
+    {
+      "id": "2311",
+      "device": "teros12",
+      "location": "Test_1",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm"}
+    },
+    {
+      "id": "2313",
+      "device": "teros12",
+      "location": "Test_3",
+      "sub_location": "mz_1",
+      "depths": {"31": "15cm"}
+    }
+  ]
+}

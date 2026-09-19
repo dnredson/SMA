@@ -13,6 +13,12 @@ __pycache__/
 adapter.key
 entities.json
 config.local.toml
+.state/
+*.sqlite
+*.sqlite3
+
+# Passive field captures (can contain deployment/device identifiers)
+captures/
 
 # Node/Build (se houver)
 node_modules/
