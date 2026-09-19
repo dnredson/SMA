@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .device_lifecycle import DecommissionedEventSuppressed
-from .reliability import is_retryable_failure, retry_deadline
+from .reliability import IngressItem, is_retryable_failure, retry_deadline
 from .service import SmarterAdapterService
 
 
@@ -19,14 +19,15 @@ class LifecycleServiceStats:
     recovered: int = 0
     dead_lettered: int = 0
     suppressed: int = 0
+    ingressed: int = 0
 
 
 class LifecycleSmarterAdapterService(SmarterAdapterService):
     """Service wrapper that treats decommission suppression as an admin decision.
 
-    Suppressed events are neither failures nor dead letters. Retry items that
-    become suppressed after a device is decommissioned are removed from the
-    retry queue instead of being replayed forever or moved to DLQ.
+    Suppressed events are neither failures nor dead letters. With durable
+    ingress enabled they are simply acknowledged by deleting the persisted raw
+    ingress row; retry items that become suppressed are likewise removed.
     """
 
     def __init__(
@@ -44,6 +45,13 @@ class LifecycleSmarterAdapterService(SmarterAdapterService):
             self.on_suppressed(exc)
 
     def _handle_event(self, raw) -> None:
+        # Let the base callback persist first when durable ingress is available.
+        # The lifecycle-specific suppression decision then runs in the ingress
+        # worker rather than inside Paho's network thread.
+        if self.durable_ingress_enabled:
+            super()._handle_event(raw)
+            return
+
         with self._lock:
             self._received += 1
         try:
@@ -57,6 +65,26 @@ class LifecycleSmarterAdapterService(SmarterAdapterService):
             self._route_failure(raw, exc)
             return
 
+        with self._lock:
+            self._processed += 1
+        if self.on_result is not None:
+            self.on_result(result)
+
+    def _process_ingress_item(self, item: IngressItem) -> None:
+        assert self.reliability_store is not None
+        try:
+            result = self.runtime.process(item.raw)
+        except DecommissionedEventSuppressed as exc:
+            self.reliability_store.delete_ingress(item.id)
+            with self._lock:
+                self._suppressed += 1
+            self._report_suppressed(exc)
+            return
+        except Exception as exc:
+            self._route_ingress_failure(item, exc)
+            return
+
+        self.reliability_store.delete_ingress(item.id)
         with self._lock:
             self._processed += 1
         if self.on_result is not None:
@@ -117,6 +145,7 @@ class LifecycleSmarterAdapterService(SmarterAdapterService):
                 recovered=self._recovered,
                 dead_lettered=self._dead_lettered,
                 suppressed=self._suppressed,
+                ingressed=self._ingressed,
             )
 
 
