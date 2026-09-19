@@ -5,9 +5,9 @@ parsers, normalizes their measurements to SenML JSON, and publishes them to
 Magistrala through the current Atom-backed FluxMQ HTTP API.
 
 The v2 runtime also manages persistent device mappings and lifecycle state,
-Atom profiles/policies, retry/DLQ, data quality, presence, LoRaWAN gateway
-presence/topology, MQTT alerts, and provider-neutral LLM context with optional
-Timescale history/trends.
+Atom profiles/policies, durable ingress/retry/DLQ, data quality, cadence-aware
+presence, LoRaWAN gateway presence/topology/stats, MQTT alerts, and
+provider-neutral LLM context with optional Timescale history/trends.
 
 ## Magistrala / Atom integration
 
@@ -37,13 +37,52 @@ The JSON body is the FluxMQ HTTP envelope:
 
 On first observation, SMA can create/reconcile the Atom device, typed profile,
 and direct `publish` policy for the configured channel. Local SQLite state
-keeps durable mappings, lifecycle/retry/DLQ/quality metadata and does not store
-a per-device secret.
+keeps durable mappings, lifecycle/ingress/retry/DLQ/quality metadata and does
+not store a per-device secret.
 
 LoRaWAN gateways are also represented as Atom entities under the dedicated
 `smarter-adapter-lorawan-gateway` profile. Gateway entities are observational
 infrastructure objects and deliberately do not receive the sensor channel
 `publish` permission.
+
+## Durable MQTT ingress
+
+When the production SQLite state store is configured, the main MQTT callback
+persists the complete `RawEvent` before parser/runtime processing. A dedicated
+worker then consumes this durable ingress queue:
+
+```text
+MQTT callback
+    |
+    v
+SQLite ingress_queue
+    |
+    v
+parser -> quality -> Atom/device reconciliation -> SenML -> publish
+    |                                                     |
+    | success                                             | transient failure
+    v                                                     v
+ delete ingress                                      ingress -> retry
+                                                          |
+                                                   exhausted/permanent
+                                                          v
+                                                         DLQ
+```
+
+Pending ingress rows survive an SMA restart and are processed on the next
+start. Moving an ingress row to retry or DLQ is one SQLite transaction, so the
+raw event is not deleted before its next durable state exists.
+
+This closes the previous local crash window between Paho delivering a packet
+and SMA persisting it. It does **not** claim end-to-end exactly-once delivery:
+the configured field input currently uses MQTT QoS 0, and a process failure
+after Magistrala accepts a publish but before the ingress row is deleted can
+still result in a duplicate on recovery. End-to-end idempotency is a separate
+hardening step.
+
+`GET /api/v2/status` exposes the ingress queue size and whether durable ingress
+is active. Prometheus exports `sma_events_ingressed_total`,
+`sma_ingress_queue_size` and `sma_durable_ingress`.
 
 ## ChirpStack message roles and provenance
 
@@ -72,11 +111,39 @@ Data-quality snapshots are also maintained per logical message role. A valid
 battery frame therefore cannot hide a still-invalid soil snapshot for the same
 physical sensor.
 
-## LoRaWAN gateway presence
+Protocol/firmware variants that intentionally change the meaning of payloads
+should be modeled as separate parser plugins rather than silently reinterpreting
+legacy data.
+
+## Sensor presence and reporting cadence
+
+Presence is derived from `last_seen` at read time, but reporting intervals are
+not assumed to be identical for every sensor family. A family profile can
+define:
+
+```text
+expected_interval_seconds
+stale_after_seconds
+offline_after_seconds
+```
+
+For the current Irrigap Teros12 deployment the default profile is:
+
+```text
+expected interval = 600 s
+stale after       = 900 s
+offline after     = 1800 s
+```
+
+This avoids marking a healthy ten-minute sensor stale after only five minutes.
+Unknown/plugin-provided families keep the global fallback thresholds unless a
+profile is configured through `SMA_DEVICE_PRESENCE_PROFILES_JSON`.
+
+## LoRaWAN gateway presence and statistics
 
 The gateway monitor is a separate read-only MQTT side input. It does not widen
 the main sensor pipeline subscription, so gateway traffic cannot fall through
-the sensor parser into the retry/DLQ path.
+the sensor parser into the sensor retry/DLQ path.
 
 By default it observes:
 
@@ -99,8 +166,19 @@ stale after       = 90 s
 offline after     = 180 s
 ```
 
+SMA also decodes ChirpStack `gw.GatewayStats` payloads. Both protobuf and JSON
+representations are accepted. The protobuf decoder intentionally implements
+only the published stable fields SMA needs and skips unknown fields by wire
+type. The latest successful snapshot can expose gateway time/config version,
+location, RX/TX counters, per-frequency/status counters and metadata. Common
+metadata such as gateway model, MQTT forwarder version and concentrator
+temperature is normalized into a small `health` object while the original
+metadata map is retained.
+
+Stats decoding is deliberately non-authoritative for liveness: a decode error
+never discards a valid gateway heartbeat or a previously good decoded snapshot.
 All thresholds and gateway MQTT settings are configurable in `.env.example`.
-Gateway presence and topology are persisted in the same SQLite state database.
+Gateway presence/topology/stats are persisted in the same SQLite state database.
 
 ## Quick start / deployment configuration
 
@@ -144,11 +222,11 @@ Important groups in `.env.example` include:
 - sensor MQTT input
 - LoRaWAN gateway monitoring and presence thresholds
 - Management API bearer token
-- persistent retry/DLQ policy
+- persistent ingress/retry/DLQ policy
 - MQTT alert side-channel
 - LLM-context side-channel
 - Timescale history/trend settings
-- sensor presence thresholds
+- sensor presence/cadence profiles
 
 For another deployment, replace the Irrigap broker/topic/catalog values rather
 than committing site-specific credentials.
@@ -178,9 +256,9 @@ GET  /api/v2/catalog/devices
 demand. It combines durable SMA identity/presence/quality/lifecycle state with
 the latest persisted Timescale observation and recent trend summaries. When
 available, it also includes the LoRaWAN gateways that recently received the
-sensor, including last RSSI/SNR information. This allows an agent or LLM
-integration to inspect a managed sensor without waiting for the next MQTT
-event.
+sensor, including last RSSI/SNR information and current gateway presence. This
+allows an agent or LLM integration to inspect a managed sensor without waiting
+for the next MQTT event.
 
 The endpoint keeps persisted measurements distinct from newer adapter state; a
 delayed Timescale writer therefore cannot replace the adapter's latest quality
@@ -188,7 +266,8 @@ snapshot. If Timescale is temporarily unavailable, the endpoint still returns
 durable device state and marks observation/history as unavailable.
 
 `GET /api/v2/gateways` exposes derived online/stale/offline presence plus last
-stats/uplink/connection timestamps, Atom entity id, counters and topic root.
+stats/uplink/connection timestamps, Atom entity id, counters, topic root and,
+when successfully decoded, the latest ChirpStack GatewayStats snapshot.
 
 Additional catalog lifecycle endpoints are available under `/api/v2`. Set
 `SMA_API_TOKEN` to require `Authorization: Bearer ...` for protected routes.
