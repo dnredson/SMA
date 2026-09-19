@@ -277,14 +277,39 @@ class SmarterAdapterRuntime:
         items = parsed.metadata.get("gateway_rx") or []
         if not isinstance(items, (list, tuple)):
             return
+
+        transport = parsed.metadata.get("transport")
+        if not isinstance(transport, dict):
+            transport = {}
+        f_port = parsed.metadata.get("f_port")
+        if f_port is None:
+            f_port = transport.get("f_port")
+        message_role = str(parsed.metadata.get("message_role") or "").strip().lower()
+        mqtt_topic = str(
+            parsed.metadata.get("topic")
+            or transport.get("mqtt_topic")
+            or raw.topic
+            or ""
+        )
+
         for item in items:
             if not isinstance(item, dict):
                 continue
+            # rxInfo owns radio observations (RSSI/SNR/channel). Frame-level
+            # provenance lives beside rxInfo in ParsedEvent metadata, so enrich
+            # the link sample at the runtime boundary before persistence.
+            enriched = dict(item)
+            if f_port is not None:
+                enriched.setdefault("f_port", f_port)
+            if message_role and message_role != "unknown":
+                enriched.setdefault("message_role", message_role)
+            if mqtt_topic:
+                enriched.setdefault("mqtt_topic", mqtt_topic)
             setter(
                 base.workspace.id,
                 base.channel.id,
                 parsed.external_device_id,
-                item,
+                enriched,
                 observed_at=raw.received_at,
             )
 
