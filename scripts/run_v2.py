@@ -19,7 +19,7 @@ _IRRIGAP_PRESENCE_DEFAULT = (
 
 
 def _install_runtime_extensions() -> None:
-    """Install optional production integrations before the canonical runner imports.
+    """Install production integrations before the canonical runner imports.
 
     ``run_v2_mqtt.py`` intentionally remains the canonical application wiring.
     This launcher adds richer implementations without making field-specific
@@ -65,6 +65,25 @@ def _install_runtime_extensions() -> None:
 
     presence_module.DevicePresencePolicy = ConfiguredDevicePresencePolicy
 
+    # Surface the new persistent ingress queue through the existing status API
+    # without coupling the generic management module to SQLite-only methods.
+    import smarter_adapter.management as management_module
+
+    original_status_payload = management_module._Handler._status_payload
+
+    def status_payload_with_ingress(handler):
+        payload = original_status_payload(handler)
+        counter = getattr(handler.store, "count_ingress", None)
+        payload.setdefault("queues", {})["ingress"] = (
+            int(counter()) if callable(counter) else 0
+        )
+        payload.setdefault("runtime", {})["durable_ingress"] = bool(
+            getattr(handler.service, "durable_ingress_enabled", False)
+        )
+        return payload
+
+    management_module._Handler._status_payload = status_payload_with_ingress
+
 
 def main() -> int:
     try:
@@ -101,6 +120,8 @@ def main() -> int:
         )
     elif raw_profiles:
         print("Presence profiles: configured by SMA_DEVICE_PRESENCE_PROFILES_JSON", flush=True)
+    print("Ingress:   durable SQLite queue enabled when the production state store is used", flush=True)
+    print("GW stats:  ChirpStack protobuf/JSON decoder enabled", flush=True)
 
     # Keep run_v2_mqtt.py as the canonical application entrypoint; this small
     # launcher supplies reboot-persistent local configuration and runtime
