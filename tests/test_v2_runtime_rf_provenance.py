@@ -61,6 +61,13 @@ class RuntimeRFProvenanceTests(unittest.TestCase):
                     "f_port": 31,
                     "mqtt_topic": "application/app-1/device/dev-eui/event/up",
                 },
+                "rf_tx": {
+                    "frequency_hz": 903300000,
+                    "modulation": "lora",
+                    "spreading_factor": 10,
+                    "bandwidth_hz": 125000,
+                    "code_rate": "CR_4_5",
+                },
                 "gateway_rx": [
                     {
                         "gateway_id": "000000ffff001002",
@@ -98,6 +105,11 @@ class RuntimeRFProvenanceTests(unittest.TestCase):
             gateway["mqtt_topic"],
             "application/app-1/device/dev-eui/event/up",
         )
+        self.assertEqual(gateway["frequency_hz"], 903300000)
+        self.assertEqual(gateway["modulation"], "lora")
+        self.assertEqual(gateway["spreading_factor"], 10)
+        self.assertEqual(gateway["bandwidth_hz"], 125000)
+        self.assertEqual(gateway["code_rate"], "CR_4_5")
 
     def test_runtime_uses_transport_and_raw_topic_fallbacks(self):
         store = _Store()
