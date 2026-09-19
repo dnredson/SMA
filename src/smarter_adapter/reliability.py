@@ -40,6 +40,15 @@ class RetryPolicy:
 
 
 @dataclass(frozen=True)
+class IngressItem:
+    """Raw MQTT event durably accepted before parser/runtime processing."""
+
+    id: int
+    raw: RawEvent
+    enqueued_at: float
+
+
+@dataclass(frozen=True)
 class RetryItem:
     id: int
     raw: RawEvent
@@ -62,6 +71,34 @@ class DeadLetterItem:
 
 @runtime_checkable
 class DeliveryQueueStore(Protocol):
+    # Durable ingress. Implementations that expose this surface allow the
+    # service to ACK its in-process callback only after the raw event is on
+    # durable storage, closing the pre-retry crash window.
+    def enqueue_ingress(self, raw: RawEvent) -> int: ...
+
+    def pending_ingress(self, *, limit: int = 50) -> Sequence[IngressItem]: ...
+
+    def delete_ingress(self, item_id: int) -> None: ...
+
+    def move_ingress_to_retry(
+        self,
+        item_id: int,
+        error: Exception,
+        *,
+        attempts: int,
+        next_attempt_at: float,
+    ) -> int: ...
+
+    def move_ingress_to_dlq(
+        self,
+        item_id: int,
+        error: Exception,
+        *,
+        attempts: int = 1,
+    ) -> int: ...
+
+    def count_ingress(self) -> int: ...
+
     def enqueue_retry(
         self,
         raw: RawEvent,
@@ -146,6 +183,7 @@ def retry_deadline(policy: RetryPolicy, attempt: int, *, now: Optional[float] = 
 __all__ = [
     "DeadLetterItem",
     "DeliveryQueueStore",
+    "IngressItem",
     "RetryItem",
     "RetryPolicy",
     "is_retryable_failure",
