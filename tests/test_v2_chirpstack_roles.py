@@ -12,7 +12,14 @@ from smarter_adapter.models import RawEvent
 from smarter_adapter.parsers import IrrigapChirpStackParser, IrrigapNode
 
 
-def _raw(text: str, *, device: str, f_port: int, gateway_id: str = "") -> RawEvent:
+def _raw(
+    text: str,
+    *,
+    device: str,
+    f_port: int,
+    gateway_id: str = "",
+    with_tx_info: bool = False,
+) -> RawEvent:
     envelope = {
         "time": "2026-09-18T01:33:08+00:00",
         "fPort": f_port,
@@ -33,6 +40,17 @@ def _raw(text: str, *, device: str, f_port: int, gateway_id: str = "") -> RawEve
                 "crcStatus": "CRC_OK",
             }
         ]
+    if with_tx_info:
+        envelope["txInfo"] = {
+            "frequency": 903300000,
+            "modulation": {
+                "lora": {
+                    "bandwidth": 125000,
+                    "codeRate": "CR_4_5",
+                    "spreadingFactor": 10,
+                }
+            },
+        }
     return RawEvent(
         source="mqtt:test",
         topic="application/app-1/device/eui/event/up",
@@ -128,6 +146,30 @@ class ChirpStackRoleParsingTests(unittest.TestCase):
         self.assertEqual(event.metadata["gateway_rx"][0]["gateway_id"], "000000ffff001002")
         self.assertEqual(event.metadata["gateway_rx"][0]["rssi"], -42)
         self.assertEqual(event.metadata["gateway_rx"][0]["snr"], 12.5)
+
+    def test_lora_tx_info_is_normalized_separately_from_sensor_semantics(self):
+        event = self.parser.parse(
+            _raw(
+                "S|2609180110|I|2313|M|2342.7|T|18.2|C|65",
+                device="teros12-sector1.3",
+                f_port=31,
+                gateway_id="000000ffff001002",
+                with_tx_info=True,
+            )
+        )
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(
+            event.metadata["rf_tx"],
+            {
+                "frequency_hz": 903300000,
+                "modulation": "lora",
+                "spreading_factor": 10,
+                "bandwidth_hz": 125000,
+                "code_rate": "CR_4_5",
+            },
+        )
+        self.assertEqual(event.metadata["gateway_rx"][0]["rssi"], -42)
 
 
 if __name__ == "__main__":
