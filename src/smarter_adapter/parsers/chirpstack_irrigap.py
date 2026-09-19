@@ -135,6 +135,68 @@ def _normalized_rx_info(envelope: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _mapping_value(mapping: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalized_tx_info(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize frame-level ChirpStack radio parameters when present.
+
+    In the ChirpStack application uplink event, ``txInfo`` describes the radio
+    transmission shared by all gateway receptions in ``rxInfo``. Keep it
+    separate from sensor semantics so every LoRaWAN sensor can reuse RF health.
+    """
+
+    raw = _mapping_value(envelope, "txInfo", "tx_info")
+    if not isinstance(raw, Mapping):
+        return {}
+
+    result: dict[str, Any] = {}
+    frequency = _optional_int(_mapping_value(raw, "frequency", "frequencyHz", "frequency_hz"))
+    if frequency is not None:
+        result["frequency_hz"] = frequency
+
+    modulation = _mapping_value(raw, "modulation")
+    if not isinstance(modulation, Mapping):
+        return result
+
+    lora = _mapping_value(modulation, "lora", "LoRa")
+    if isinstance(lora, Mapping):
+        result["modulation"] = "lora"
+        spreading_factor = _optional_int(
+            _mapping_value(lora, "spreadingFactor", "spreading_factor")
+        )
+        bandwidth = _optional_int(_mapping_value(lora, "bandwidth", "bandwidthHz", "bandwidth_hz"))
+        code_rate = str(_mapping_value(lora, "codeRate", "code_rate") or "").strip()
+        if spreading_factor is not None:
+            result["spreading_factor"] = spreading_factor
+        if bandwidth is not None:
+            result["bandwidth_hz"] = bandwidth
+        if code_rate:
+            result["code_rate"] = code_rate
+        return result
+
+    fsk = _mapping_value(modulation, "fsk", "FSK")
+    if isinstance(fsk, Mapping):
+        result["modulation"] = "fsk"
+        bitrate = _optional_int(_mapping_value(fsk, "datarate", "dataRate", "bitrate"))
+        if bitrate is not None:
+            result["bitrate_bps"] = bitrate
+    return result
+
+
 class IrrigapChirpStackParser:
     """Parse the ChirpStack MQTT envelope used by the Irrigap deployment.
 
@@ -349,6 +411,7 @@ class IrrigapChirpStackParser:
             "status": "on-line",
             "raw_ultralight": raw_text,
             "gateway_rx": _normalized_rx_info(envelope),
+            "rf_tx": _normalized_tx_info(envelope),
         }
         if port_role != "unknown" and message_role != "unknown" and port_role != message_role:
             metadata["port_role_mismatch"] = True
