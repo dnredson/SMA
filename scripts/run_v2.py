@@ -28,21 +28,25 @@ def _install_runtime_extensions() -> None:
 
     import smarter_adapter.gateway_monitor as gateway_monitor
     import smarter_adapter.presence as presence_module
-    from smarter_adapter.gateway_stats import (
-        GatewayStatsMqttObserver,
-        GatewayStatsTopologySQLiteManagementStore,
-    )
+    from smarter_adapter.gateway_stats import GatewayStatsMqttObserver
     from smarter_adapter.presence import (
         DevicePresencePolicy as BaseDevicePresencePolicy,
         parse_presence_profiles,
     )
+    from smarter_adapter.rf_health import (
+        RFHealthTopologySQLiteManagementStore,
+        install_rf_management_api,
+    )
 
     # The canonical runner imports these names from gateway_monitor after this
-    # function returns, so it transparently gets stats decoding/persistence.
+    # function returns. The RF-health store extends the gateway-stats store, so
+    # one production SQLite implementation provides gateway state, decoded stats,
+    # latest topology links and persistent RF-link history.
     gateway_monitor.GatewayMqttObserver = GatewayStatsMqttObserver
     gateway_monitor.GatewayTopologySQLiteManagementStore = (
-        GatewayStatsTopologySQLiteManagementStore
+        RFHealthTopologySQLiteManagementStore
     )
+    install_rf_management_api()
 
     class ConfiguredDevicePresencePolicy(BaseDevicePresencePolicy):
         def __init__(self, *args, family_thresholds=None, **kwargs):
@@ -65,7 +69,7 @@ def _install_runtime_extensions() -> None:
 
     presence_module.DevicePresencePolicy = ConfiguredDevicePresencePolicy
 
-    # Surface the new persistent ingress queue through the existing status API
+    # Surface the persistent ingress queue through the existing status API
     # without coupling the generic management module to SQLite-only methods.
     import smarter_adapter.management as management_module
 
@@ -80,6 +84,12 @@ def _install_runtime_extensions() -> None:
         payload.setdefault("runtime", {})["durable_ingress"] = bool(
             getattr(handler.service, "durable_ingress_enabled", False)
         )
+        rf_counter = getattr(handler.store, "count_rf_samples", None)
+        payload.setdefault("runtime", {})["rf_health_history"] = bool(
+            callable(rf_counter)
+        )
+        if callable(rf_counter):
+            payload["runtime"]["rf_samples_stored"] = int(rf_counter())
         return payload
 
     management_module._Handler._status_payload = status_payload_with_ingress
@@ -122,6 +132,12 @@ def main() -> int:
         print("Presence profiles: configured by SMA_DEVICE_PRESENCE_PROFILES_JSON", flush=True)
     print("Ingress:   durable SQLite queue enabled when the production state store is used", flush=True)
     print("GW stats:  ChirpStack protobuf/JSON decoder enabled", flush=True)
+    print(
+        "RF health: persistent RSSI/SNR link history enabled "
+        f"retention={os.getenv('SMA_RF_RETENTION_DAYS', '90')}d "
+        f"summary={os.getenv('SMA_RF_SUMMARY_WINDOW_HOURS', '24')}h",
+        flush=True,
+    )
 
     # Keep run_v2_mqtt.py as the canonical application entrypoint; this small
     # launcher supplies reboot-persistent local configuration and runtime
