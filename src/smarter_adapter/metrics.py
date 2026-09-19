@@ -41,6 +41,11 @@ def render_prometheus_metrics(status: Mapping[str, Any], *, ready: bool) -> str:
 
     counters = (
         ("received", "sma_events_received_total", "Raw events received from inputs."),
+        (
+            "ingressed",
+            "sma_events_ingressed_total",
+            "Raw events durably accepted into the ingress queue.",
+        ),
         ("processed", "sma_events_processed_total", "Events processed and published successfully."),
         ("failed", "sma_events_failed_total", "Initial processing failures."),
         ("queued", "sma_events_queued_total", "Failures queued for retry."),
@@ -64,6 +69,9 @@ def render_prometheus_metrics(status: Mapping[str, Any], *, ready: bool) -> str:
 
     lines.extend(
         [
+            "# HELP sma_ingress_queue_size Raw events durably accepted and waiting for initial processing.",
+            "# TYPE sma_ingress_queue_size gauge",
+            f"sma_ingress_queue_size {_num(queues.get('ingress', 0))}",
             "# HELP sma_retry_queue_size Events currently waiting in the retry queue.",
             "# TYPE sma_retry_queue_size gauge",
             f"sma_retry_queue_size {_num(queues.get('retry', 0))}",
@@ -128,6 +136,9 @@ def render_prometheus_metrics(status: Mapping[str, Any], *, ready: bool) -> str:
             "# HELP sma_reader_configured Whether the Timescale reader is configured.",
             "# TYPE sma_reader_configured gauge",
             f"sma_reader_configured {_num(bool(runtime.get('reader_configured', False)))}",
+            "# HELP sma_durable_ingress Whether raw-event durable ingress is active.",
+            "# TYPE sma_durable_ingress gauge",
+            f"sma_durable_ingress {_num(bool(runtime.get('durable_ingress', False)))}",
             "# HELP sma_input_connected MQTT input connection state.",
             "# TYPE sma_input_connected gauge",
         ]
