@@ -19,11 +19,21 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
 
     RSSI/SNR are intentionally kept as observations rather than converted into
     an absolute good/bad verdict. Absolute LoRa link margins depend on radio
-    parameters and deployment conditions. The summary therefore reports raw
-    statistics plus change/trend only.
+    parameters and deployment conditions. Aggregate slopes are retained as raw
+    diagnostics, while the assessment explicitly refuses to treat mixed radio
+    conditions as one comparable time-series.
     """
 
     schema = "smarter-adapter.rf-health/1"
+
+    _RF_COLUMNS = {
+        "frequency_hz": "INTEGER",
+        "modulation": "TEXT NOT NULL DEFAULT ''",
+        "spreading_factor": "INTEGER",
+        "bandwidth_hz": "INTEGER",
+        "code_rate": "TEXT NOT NULL DEFAULT ''",
+        "bitrate_bps": "INTEGER",
+    }
 
     def __init__(
         self,
@@ -74,6 +84,12 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
                     f_port INTEGER,
                     message_role TEXT NOT NULL DEFAULT '',
                     mqtt_topic TEXT NOT NULL DEFAULT '',
+                    frequency_hz INTEGER,
+                    modulation TEXT NOT NULL DEFAULT '',
+                    spreading_factor INTEGER,
+                    bandwidth_hz INTEGER,
+                    code_rate TEXT NOT NULL DEFAULT '',
+                    bitrate_bps INTEGER,
                     created_at REAL NOT NULL,
                     UNIQUE (
                         workspace_id, channel_id, external_id,
@@ -82,6 +98,17 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
                 )
                 """
             )
+            # Existing field deployments already have rf_link_samples. Additive
+            # migration keeps their observations while enabling richer samples.
+            existing = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(rf_link_samples)").fetchall()
+            }
+            for name, sql_type in self._RF_COLUMNS.items():
+                if name not in existing:
+                    self._conn.execute(
+                        f"ALTER TABLE rf_link_samples ADD COLUMN {name} {sql_type}"
+                    )
             self._conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_rf_link_samples_device_time
@@ -146,6 +173,12 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
         role = str(gateway.get("message_role") or "").strip().lower()
         topic = str(gateway.get("mqtt_topic") or "")
         crc_status = str(gateway.get("crc_status") or "")
+        frequency_hz = self._optional_int(gateway.get("frequency_hz"))
+        modulation = str(gateway.get("modulation") or "").strip().lower()
+        spreading_factor = self._optional_int(gateway.get("spreading_factor"))
+        bandwidth_hz = self._optional_int(gateway.get("bandwidth_hz"))
+        code_rate = str(gateway.get("code_rate") or "").strip()
+        bitrate_bps = self._optional_int(gateway.get("bitrate_bps"))
 
         with self._lock, self._conn:
             self._conn.execute(
@@ -153,8 +186,10 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
                 INSERT INTO rf_link_samples (
                     workspace_id, channel_id, external_id, gateway_id,
                     observed_at, rssi, snr, channel, rf_chain, crc_status,
-                    f_port, message_role, mqtt_topic, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    f_port, message_role, mqtt_topic,
+                    frequency_hz, modulation, spreading_factor, bandwidth_hz,
+                    code_rate, bitrate_bps, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(
                     workspace_id, channel_id, external_id, gateway_id, observed_at
                 ) DO UPDATE SET
@@ -169,7 +204,17 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
                         ELSE rf_link_samples.message_role END,
                     mqtt_topic = CASE
                         WHEN excluded.mqtt_topic <> '' THEN excluded.mqtt_topic
-                        ELSE rf_link_samples.mqtt_topic END
+                        ELSE rf_link_samples.mqtt_topic END,
+                    frequency_hz = COALESCE(excluded.frequency_hz, rf_link_samples.frequency_hz),
+                    modulation = CASE
+                        WHEN excluded.modulation <> '' THEN excluded.modulation
+                        ELSE rf_link_samples.modulation END,
+                    spreading_factor = COALESCE(excluded.spreading_factor, rf_link_samples.spreading_factor),
+                    bandwidth_hz = COALESCE(excluded.bandwidth_hz, rf_link_samples.bandwidth_hz),
+                    code_rate = CASE
+                        WHEN excluded.code_rate <> '' THEN excluded.code_rate
+                        ELSE rf_link_samples.code_rate END,
+                    bitrate_bps = COALESCE(excluded.bitrate_bps, rf_link_samples.bitrate_bps)
                 """,
                 (
                     str(workspace_id),
@@ -185,6 +230,12 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
                     f_port,
                     role,
                     topic,
+                    frequency_hz,
+                    modulation,
+                    spreading_factor,
+                    bandwidth_hz,
+                    code_rate,
+                    bitrate_bps,
                     time.time(),
                 ),
             )
@@ -208,6 +259,12 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
             "f_port": int(row["f_port"]) if row["f_port"] is not None else None,
             "message_role": str(row["message_role"] or ""),
             "mqtt_topic": str(row["mqtt_topic"] or ""),
+            "frequency_hz": int(row["frequency_hz"]) if row["frequency_hz"] is not None else None,
+            "modulation": str(row["modulation"] or ""),
+            "spreading_factor": int(row["spreading_factor"]) if row["spreading_factor"] is not None else None,
+            "bandwidth_hz": int(row["bandwidth_hz"]) if row["bandwidth_hz"] is not None else None,
+            "code_rate": str(row["code_rate"] or ""),
+            "bitrate_bps": int(row["bitrate_bps"]) if row["bitrate_bps"] is not None else None,
         }
 
     def list_rf_samples(
@@ -328,6 +385,112 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
                 summary["trend"] = "stable"
         return summary
 
+    @staticmethod
+    def _radio_profile(item: Mapping[str, Any]) -> Optional[tuple[Any, ...]]:
+        values = (
+            item.get("frequency_hz"),
+            str(item.get("modulation") or ""),
+            item.get("spreading_factor"),
+            item.get("bandwidth_hz"),
+            str(item.get("code_rate") or ""),
+            item.get("bitrate_bps"),
+        )
+        if all(value in (None, "") for value in values):
+            return None
+        return values
+
+    @staticmethod
+    def _radio_profile_public(profile: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "frequency_hz": profile[0],
+            "modulation": profile[1],
+            "spreading_factor": profile[2],
+            "bandwidth_hz": profile[3],
+            "code_rate": profile[4],
+            "bitrate_bps": profile[5],
+        }
+
+    def _condition_groups(self, samples: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        by_channel: dict[Optional[int], list[dict[str, Any]]] = defaultdict(list)
+        by_profile: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+        for item in samples:
+            channel = item.get("channel")
+            by_channel[int(channel) if channel is not None else None].append(item)
+            profile = self._radio_profile(item)
+            if profile is not None:
+                by_profile[profile].append(item)
+
+        channel_summaries = [
+            {
+                "channel": channel,
+                "samples": len(group),
+                "rssi": self._series_summary(group, "rssi"),
+                "snr": self._series_summary(group, "snr"),
+            }
+            for channel, group in sorted(
+                by_channel.items(), key=lambda entry: (-1 if entry[0] is None else entry[0])
+            )
+        ]
+        profile_summaries = [
+            {
+                "profile": self._radio_profile_public(profile),
+                "samples": len(group),
+                "rssi": self._series_summary(group, "rssi"),
+                "snr": self._series_summary(group, "snr"),
+            }
+            for profile, group in sorted(by_profile.items(), key=lambda entry: repr(entry[0]))
+        ]
+        return channel_summaries, profile_summaries
+
+    def _assessment(
+        self,
+        samples: list[dict[str, Any]],
+        *,
+        channels: list[int],
+        rssi: Mapping[str, Any],
+        snr: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        profiles = [self._radio_profile(item) for item in samples]
+        known_profiles = {profile for profile in profiles if profile is not None}
+        missing_profiles = sum(1 for profile in profiles if profile is None)
+        if len(samples) < 3:
+            return {
+                "status": "insufficient",
+                "reason": "fewer_than_three_samples",
+                "comparable": False,
+            }
+        if len(known_profiles) > 1:
+            return {
+                "status": "mixed_conditions",
+                "reason": "multiple_radio_profiles",
+                "comparable": False,
+                "raw_aggregate_rssi_trend": rssi.get("trend"),
+                "raw_aggregate_snr_trend": snr.get("trend"),
+            }
+        if known_profiles and missing_profiles:
+            return {
+                "status": "mixed_conditions",
+                "reason": "partial_radio_profile_coverage",
+                "comparable": False,
+                "raw_aggregate_rssi_trend": rssi.get("trend"),
+                "raw_aggregate_snr_trend": snr.get("trend"),
+            }
+        if not known_profiles and len(channels) > 1:
+            return {
+                "status": "mixed_conditions",
+                "reason": "multiple_channels_without_radio_profile",
+                "comparable": False,
+                "raw_aggregate_rssi_trend": rssi.get("trend"),
+                "raw_aggregate_snr_trend": snr.get("trend"),
+            }
+        return {
+            "status": "comparable",
+            "reason": "single_observed_radio_condition",
+            "comparable": True,
+            "rssi_trend": rssi.get("trend"),
+            "snr_trend": snr.get("trend"),
+        }
+
     def _gateway_summary(
         self,
         gateway_id: str,
@@ -341,16 +504,27 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
         roles = sorted(
             {str(item["message_role"]) for item in ordered if item.get("message_role")}
         )
+        rssi = self._series_summary(ordered, "rssi")
+        snr = self._series_summary(ordered, "snr")
+        by_channel, by_profile = self._condition_groups(ordered)
         return {
             "gateway_id": gateway_id,
             "samples": len(ordered),
             "first_at": float(ordered[0]["observed_at"]) if ordered else None,
             "last_at": float(ordered[-1]["observed_at"]) if ordered else None,
             "latest": latest,
-            "rssi": self._series_summary(ordered, "rssi"),
-            "snr": self._series_summary(ordered, "snr"),
+            "rssi": rssi,
+            "snr": snr,
             "channels": channels,
             "message_roles": roles,
+            "assessment": self._assessment(
+                ordered,
+                channels=channels,
+                rssi=rssi,
+                snr=snr,
+            ),
+            "by_channel": by_channel,
+            "by_radio_profile": by_profile,
         }
 
     def rf_health_report(
@@ -433,6 +607,11 @@ class RFHealthTopologySQLiteManagementStore(GatewayStatsTopologySQLiteManagement
                     "samples": 0,
                     "rssi": {"trend": "insufficient", "samples": 0},
                     "snr": {"trend": "insufficient", "samples": 0},
+                    "assessment": {
+                        "status": "insufficient",
+                        "reason": "no_samples",
+                        "comparable": False,
+                    },
                 }
             )
         return links
