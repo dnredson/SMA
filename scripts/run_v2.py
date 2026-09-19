@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import runpy
 import sys
 from pathlib import Path
@@ -9,6 +10,60 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from smarter_adapter.envfile import EnvFileError, load_default_env
+
+
+_IRRIGAP_PRESENCE_DEFAULT = (
+    '{"teros12":{"expected_interval_seconds":600,'
+    '"stale_after_seconds":900,"offline_after_seconds":1800}}'
+)
+
+
+def _install_runtime_extensions() -> None:
+    """Install optional production integrations before the canonical runner imports.
+
+    ``run_v2_mqtt.py`` intentionally remains the canonical application wiring.
+    This launcher adds richer implementations without making field-specific
+    behavior a dependency of the transport-neutral core modules.
+    """
+
+    import smarter_adapter.gateway_monitor as gateway_monitor
+    import smarter_adapter.presence as presence_module
+    from smarter_adapter.gateway_stats import (
+        GatewayStatsMqttObserver,
+        GatewayStatsTopologySQLiteManagementStore,
+    )
+    from smarter_adapter.presence import (
+        DevicePresencePolicy as BaseDevicePresencePolicy,
+        parse_presence_profiles,
+    )
+
+    # The canonical runner imports these names from gateway_monitor after this
+    # function returns, so it transparently gets stats decoding/persistence.
+    gateway_monitor.GatewayMqttObserver = GatewayStatsMqttObserver
+    gateway_monitor.GatewayTopologySQLiteManagementStore = (
+        GatewayStatsTopologySQLiteManagementStore
+    )
+
+    class ConfiguredDevicePresencePolicy(BaseDevicePresencePolicy):
+        def __init__(self, *args, family_thresholds=None, **kwargs):
+            if family_thresholds is None:
+                raw = str(os.getenv("SMA_DEVICE_PRESENCE_PROFILES_JSON", "")).strip()
+                environment = str(os.getenv("SMA_ENVIRONMENT", "test")).strip().lower()
+                if not raw and environment in {
+                    "irrigap",
+                    "field",
+                    "production",
+                    "prod",
+                }:
+                    raw = _IRRIGAP_PRESENCE_DEFAULT
+                family_thresholds = parse_presence_profiles(raw)
+            super().__init__(
+                *args,
+                family_thresholds=family_thresholds,
+                **kwargs,
+            )
+
+    presence_module.DevicePresencePolicy = ConfiguredDevicePresencePolicy
 
 
 def main() -> int:
@@ -30,8 +85,26 @@ def main() -> int:
             flush=True,
         )
 
+    try:
+        _install_runtime_extensions()
+    except (ValueError, TypeError) as exc:
+        print(f"ERROR: invalid runtime extension configuration: {exc}", file=sys.stderr)
+        return 2
+
+    environment = str(os.getenv("SMA_ENVIRONMENT", "test")).strip().lower()
+    raw_profiles = str(os.getenv("SMA_DEVICE_PRESENCE_PROFILES_JSON", "")).strip()
+    if not raw_profiles and environment in {"irrigap", "field", "production", "prod"}:
+        print(
+            "Presence profiles: teros12 expected=600s stale>900s offline>1800s; "
+            "other families use fallback thresholds",
+            flush=True,
+        )
+    elif raw_profiles:
+        print("Presence profiles: configured by SMA_DEVICE_PRESENCE_PROFILES_JSON", flush=True)
+
     # Keep run_v2_mqtt.py as the canonical application entrypoint; this small
-    # launcher only supplies reboot-persistent local configuration first.
+    # launcher supplies reboot-persistent local configuration and runtime
+    # extensions first.
     try:
         runpy.run_path(str(ROOT / "scripts" / "run_v2_mqtt.py"), run_name="__main__")
     except SystemExit as exc:
