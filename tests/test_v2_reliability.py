@@ -111,17 +111,19 @@ class ReliabilityTests(unittest.TestCase):
                     time.sleep(0.01)
                 stats = service.stats
                 self.assertEqual(stats.received, 1)
+                self.assertEqual(stats.ingressed, 1)
                 self.assertEqual(stats.queued, 1)
                 self.assertEqual(stats.recovered, 1)
                 self.assertEqual(stats.processed, 1)
                 self.assertGreaterEqual(stats.retried, 1)
+                self.assertEqual(store.count_ingress(), 0)
                 self.assertEqual(store.count_retries(), 0)
                 self.assertEqual(store.count_dlq(), 0)
             finally:
                 service.stop()
                 store.close()
 
-    def test_permanent_failure_goes_directly_to_dlq(self):
+    def test_permanent_failure_goes_from_ingress_to_dlq(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteStateStore(Path(tmp) / "state.sqlite3")
             runtime = _Runtime([ParserNotFound("unknown payload")])
@@ -136,11 +138,19 @@ class ReliabilityTests(unittest.TestCase):
                     poll_interval_seconds=0.01,
                 ),
             )
-            service._handle_event(RawEvent(source="mqtt:test", payload=b"bad"))
-            self.assertEqual(store.count_retries(), 0)
-            self.assertEqual(store.count_dlq(), 1)
-            self.assertEqual(service.stats.dead_lettered, 1)
-            store.close()
+            service.start()
+            try:
+                service._handle_event(RawEvent(source="mqtt:test", payload=b"bad"))
+                deadline = time.time() + 1.0
+                while store.count_dlq() < 1 and time.time() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(store.count_ingress(), 0)
+                self.assertEqual(store.count_retries(), 0)
+                self.assertEqual(store.count_dlq(), 1)
+                self.assertEqual(service.stats.dead_lettered, 1)
+            finally:
+                service.stop()
+                store.close()
 
 
 if __name__ == "__main__":
