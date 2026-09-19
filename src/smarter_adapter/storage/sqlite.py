@@ -9,11 +9,11 @@ from typing import Optional, Union
 
 from ..magistrala.control_plane import DeviceRef
 from ..models import RawEvent
-from ..reliability import DeadLetterItem, RetryItem
+from ..reliability import DeadLetterItem, IngressItem, RetryItem
 
 
 class SQLiteStateStore:
-    """Durable Smarter Adapter state, retry queue and dead-letter queue."""
+    """Durable Smarter Adapter state, ingress, retry and dead-letter queues."""
 
     def __init__(self, path: Union[str, Path]) -> None:
         self.path = Path(path).expanduser()
@@ -45,6 +45,28 @@ class SQLiteStateStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_managed_devices_atom_id
                 ON managed_devices(atom_device_id)
+                """
+            )
+            # Raw events enter this queue directly from the MQTT callback before
+            # parser/runtime processing. A successful processing transaction
+            # removes the row; failures are atomically promoted to retry or DLQ.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ingress_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    received_at REAL NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    enqueued_at REAL NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ingress_queue_order
+                ON ingress_queue(id)
                 """
             )
             self._conn.execute(
@@ -182,6 +204,136 @@ class SQLiteStateStore:
             row = self._conn.execute(query, values).fetchone()
         return int(row["n"] if row is not None else 0)
 
+    # ------------------------------------------------------------------
+    # Durable ingress
+    # ------------------------------------------------------------------
+    def enqueue_ingress(self, raw: RawEvent) -> int:
+        now = time.time()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO ingress_queue (
+                    source, topic, payload, received_at, metadata_json, enqueued_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    raw.source,
+                    raw.topic,
+                    sqlite3.Binary(raw.payload),
+                    raw.received_at,
+                    self._metadata_json(raw),
+                    now,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def pending_ingress(self, *, limit: int = 50):
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM ingress_queue ORDER BY id ASC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [
+            IngressItem(
+                id=int(row["id"]),
+                raw=self._raw_from_row(row),
+                enqueued_at=float(row["enqueued_at"]),
+            )
+            for row in rows
+        ]
+
+    def delete_ingress(self, item_id: int) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM ingress_queue WHERE id = ?", (int(item_id),))
+
+    def move_ingress_to_retry(
+        self,
+        item_id: int,
+        error: Exception,
+        *,
+        attempts: int,
+        next_attempt_at: float,
+    ) -> int:
+        now = time.time()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM ingress_queue WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+            if row is None:
+                return 0
+            cursor = self._conn.execute(
+                """
+                INSERT INTO retry_queue (
+                    source, topic, payload, received_at, metadata_json,
+                    attempts, next_attempt_at, first_failed_at,
+                    last_error, error_type, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["source"],
+                    row["topic"],
+                    row["payload"],
+                    row["received_at"],
+                    row["metadata_json"],
+                    int(attempts),
+                    float(next_attempt_at),
+                    now,
+                    str(error),
+                    type(error).__name__,
+                    now,
+                ),
+            )
+            retry_id = int(cursor.lastrowid)
+            self._conn.execute("DELETE FROM ingress_queue WHERE id = ?", (int(item_id),))
+            return retry_id
+
+    def move_ingress_to_dlq(
+        self,
+        item_id: int,
+        error: Exception,
+        *,
+        attempts: int = 1,
+    ) -> int:
+        now = time.time()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM ingress_queue WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+            if row is None:
+                return 0
+            cursor = self._conn.execute(
+                """
+                INSERT INTO dead_letters (
+                    source, topic, payload, received_at, metadata_json,
+                    attempts, failed_at, last_error, error_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["source"],
+                    row["topic"],
+                    row["payload"],
+                    row["received_at"],
+                    row["metadata_json"],
+                    int(attempts),
+                    now,
+                    str(error),
+                    type(error).__name__,
+                ),
+            )
+            dlq_id = int(cursor.lastrowid)
+            self._conn.execute("DELETE FROM ingress_queue WHERE id = ?", (int(item_id),))
+            return dlq_id
+
+    def count_ingress(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM ingress_queue").fetchone()
+        return int(row["n"] if row is not None else 0)
+
+    # ------------------------------------------------------------------
+    # Retry / DLQ
+    # ------------------------------------------------------------------
     def enqueue_retry(self, raw: RawEvent, error: Exception, *, attempts: int, next_attempt_at: float) -> int:
         now = time.time()
         with self._lock, self._conn:
