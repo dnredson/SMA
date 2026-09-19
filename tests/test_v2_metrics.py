@@ -22,6 +22,7 @@ class MetricsTests(unittest.TestCase):
             {
                 "service": {
                     "received": 10,
+                    "ingressed": 10,
                     "processed": 8,
                     "failed": 2,
                     "queued": 1,
@@ -29,10 +30,14 @@ class MetricsTests(unittest.TestCase):
                     "recovered": 1,
                     "dead_lettered": 1,
                 },
-                "queues": {"retry": 2, "dlq": 1},
+                "queues": {"ingress": 2, "retry": 2, "dlq": 1},
                 "devices": {"online": 2, "stale": 1, "offline": 0},
                 "quality": {"valid": 1, "degraded": 0, "invalid": 1, "unknown": 1},
-                "runtime": {"device_cache_size": 2, "reader_configured": True},
+                "runtime": {
+                    "device_cache_size": 2,
+                    "reader_configured": True,
+                    "durable_ingress": True,
+                },
                 "inputs": [
                     {
                         "source": 'mqtt:test"quoted',
@@ -46,6 +51,9 @@ class MetricsTests(unittest.TestCase):
         )
         self.assertIn("sma_ready 1", text)
         self.assertIn("sma_events_received_total 10", text)
+        self.assertIn("sma_events_ingressed_total 10", text)
+        self.assertIn("sma_ingress_queue_size 2", text)
+        self.assertIn("sma_durable_ingress 1", text)
         self.assertIn('sma_devices{status="stale"} 1', text)
         self.assertIn('sma_device_quality{status="invalid"} 1', text)
         self.assertIn('source="mqtt:test\\"quoted"', text)
