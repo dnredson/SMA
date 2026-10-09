@@ -11,10 +11,10 @@ from ..models import Measurement, ParsedEvent, RawEvent
 
 
 _TOPIC_RE = re.compile(r"^pitaya/(?P<location>[^/]+)_DATA$", re.IGNORECASE)
-_SENSOR_SLOT_RE = re.compile(r"^s(?P<slot>[1-9]|[1-4]\\d|50)$", re.IGNORECASE)
+_SENSOR_SLOT_RE = re.compile(r"^s(?P<slot>[1-9]|[1-4]\d|50)$", re.IGNORECASE)
 _RELAY_SLOT_RE = re.compile(r"^rele(?P<slot>[1-7])$", re.IGNORECASE)
 _FIELD_RE = re.compile(
-    r'"(?P<key>[A-Za-z0-9_]+)"\\s*:\\s*(?P<value>-?\\d+(?:\\.\\d+)?)'
+    r'"(?P<key>[A-Za-z0-9_]+)"\s*:\s*(?P<value>-?\d+(?:\.\d+)?)'
 )
 
 SENSOR_SENTINEL = 99.0
