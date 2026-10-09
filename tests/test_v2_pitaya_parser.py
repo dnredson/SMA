@@ -29,20 +29,16 @@ class PitayaSaciParserTests(unittest.TestCase):
         self.assertTrue(parser.supports(self._raw({}, "pitaya/LANAPRE_DATA")))
         self.assertFalse(parser.supports(self._raw({}, "ATMOS41_WS_NSAAB")))
 
-    def test_only_usable_values_are_emitted(self):
+    def test_only_validated_sensor_fields_are_emitted(self):
         payload = {
             "date": "09/10/2026",
             "hour": "12:53:04",
             "s1": (
-                '"ID":01,"S1":03,"S2":09,"S3":08,"S4":00,"S5":00,"S6":00,'
-                '"BAT":99,"T1":-7,"T2":99,"T3":99'
-            ),
-            "s2": (
-                '"ID":02,"S1":99,"S2":99,"S3":99,"S4":99,"S5":99,"S6":99,'
-                '"BAT":99,"T1":0,"T2":0,"T3":0'
+                '"ID":01,"S1":03,"S2":09,"S3":99,"S4":00,"S5":99,"S6":00,'
+                '"BAT":87,"T1":-7,"T2":12,"T3":99'
             ),
             "rele1": (
-                '"ID":51,"R1":1,"R2":0,"R3":99,"R4":0,'
+                '"ID":51,"R1":1,"R2":0,"R3":0,"R4":0,'
                 '"R5":0,"R6":0,"R7":0,"R8":0'
             ),
         }
@@ -56,32 +52,44 @@ class PitayaSaciParserTests(unittest.TestCase):
         self.assertEqual(event.metadata["timestamp_source"], "payload")
 
         values = {item.name: item.value for item in event.measurements}
+
+        # Validated V1 surface: only S1..S6 values != 99.
         self.assertEqual(values["sensorboard.s01.id01.s1.raw"], 3)
         self.assertEqual(values["sensorboard.s01.id01.s2.raw"], 9)
-        self.assertEqual(values["sensorboard.s01.id01.soil.tension.t1"], -7)
+        self.assertEqual(values["sensorboard.s01.id01.s4.raw"], 0)
+        self.assertEqual(values["sensorboard.s01.id01.s6.raw"], 0)
+        self.assertNotIn("sensorboard.s01.id01.s3.raw", values)
+        self.assertNotIn("sensorboard.s01.id01.s5.raw", values)
 
-        # 99 always means unavailable/not in use and must not be persisted.
-        self.assertNotIn("sensorboard.s01.id01.battery.level", values)
-        self.assertNotIn("sensorboard.s01.id01.soil.tension.t2", values)
-        self.assertNotIn("sensorboard.s02.id02.s1.raw", values)
-
-        # An entirely unavailable sensor board must not turn firmware T=0
-        # defaults into scientific telemetry.
-        self.assertNotIn("sensorboard.s02.id02.soil.tension.t1", values)
-
-        self.assertIs(values["relayboard.rele1.id51.r1.state"], True)
-        self.assertIs(values["relayboard.rele1.id51.r2.state"], False)
-        self.assertNotIn("relayboard.rele1.id51.r3.state", values)
-
-        # No synthetic bus/quality rows are published.
+        # Not yet validated for the current field trial: BAT, T1..T3 and relays.
+        self.assertFalse(any("battery" in name for name in values))
+        self.assertFalse(any("tension" in name for name in values))
+        self.assertFalse(any(name.startswith("relayboard.") for name in values))
         self.assertFalse(any(name.startswith("bus.") for name in values))
-        self.assertFalse(any(name.startswith("sensor.data_quality") for name in values))
 
         expected = datetime(
             2026, 10, 9, 12, 53, 4, tzinfo=ZoneInfo("America/Sao_Paulo")
         ).timestamp()
         first = event.measurements[0]
         self.assertEqual(first.timestamp, expected)
+
+    def test_all_99_sensor_snapshot_emits_no_telemetry(self):
+        payload = {
+            "date": "09/10/2026",
+            "hour": "12:53:04",
+            "s1": (
+                '"ID":01,"S1":99,"S2":99,"S3":99,"S4":99,"S5":99,"S6":99,'
+                '"BAT":99,"T1":99,"T2":99,"T3":99'
+            ),
+            "rele1": (
+                '"ID":51,"R1":0,"R2":0,"R3":0,"R4":0,'
+                '"R5":0,"R6":0,"R7":0,"R8":0'
+            ),
+        }
+        event = PitayaSaciParser().parse(self._raw(payload))
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.measurements, ())
 
     def test_identity_anomalies_stay_in_metadata_only(self):
         payload = {
@@ -117,9 +125,9 @@ class PitayaSaciParserTests(unittest.TestCase):
         payload = {
             "date": "bad",
             "hour": "bad",
-            "rele1": (
-                '"ID":51,"R1":1,"R2":0,"R3":0,"R4":0,'
-                '"R5":0,"R6":0,"R7":0,"R8":0'
+            "s1": (
+                '"ID":01,"S1":10,"S2":99,"S3":99,"S4":99,"S5":99,"S6":99,'
+                '"BAT":80,"T1":-10,"T2":99,"T3":99'
             ),
         }
         event = PitayaSaciParser().parse(self._raw(payload))
