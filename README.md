@@ -499,16 +499,17 @@ data.
 
 Current conservative semantics:
 
-- `S1..S6 == 99` means the sensor input is not operational and is omitted from
-  scientific telemetry;
+- source value `99` means unavailable/not in use and is never persisted as
+  telemetry, including `S1..S6`, `BAT`, `T1..T3` and relay fields;
 - operational `S1..S6` values are preserved as raw values without inventing a
   physical unit;
 - `T1..T3` are emitted as device-calculated soil tension in kPa only when that
-  board has at least one operational S input;
-- `BAT` is retained as a 0..100 percent value;
-- relay values `0/1` become boolean states;
-- slot/ID mismatches, duplicate board IDs and malformed blocks are retained as
-  compact bus diagnostics and degrade payload quality;
+  board has at least one usable S input, preventing firmware default zeroes from
+  unused boards from becoming scientific telemetry;
+- valid battery values are retained as 0..100 percent;
+- valid relay values `0/1` become boolean states;
+- slot/ID mismatches, duplicate board IDs and malformed blocks remain parser
+  metadata for debugging, but are not written as synthetic telemetry rows;
 - source `date`/`hour` is interpreted in `SMA_PITAYA_TIMEZONE` (default
   `America/Sao_Paulo`), with receive time as fallback.
 
