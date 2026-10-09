@@ -12,7 +12,6 @@ from ..models import Measurement, ParsedEvent, RawEvent
 
 _TOPIC_RE = re.compile(r"^pitaya/(?P<location>[^/]+)_DATA$", re.IGNORECASE)
 _SENSOR_SLOT_RE = re.compile(r"^s(?P<slot>[1-9]|[1-4]\d|50)$", re.IGNORECASE)
-_RELAY_SLOT_RE = re.compile(r"^rele(?P<slot>[1-7])$", re.IGNORECASE)
 _FIELD_RE = re.compile(
     r'"(?P<key>[A-Za-z0-9_]+)"\s*:\s*(?P<value>-?\d+(?:\.\d+)?)'
 )
@@ -84,13 +83,14 @@ class PitayaSaciParser:
     Topic convention: pitaya/<LOCATION>_DATA.
 
     V1 keeps one logical Atom device per Pitaya installation/location and emits
-    only usable telemetry values. Source value 99 is a firmware sentinel meaning
-    unavailable/not in use and is therefore ignored rather than persisted as a
-    measurement.
+    only the field subset already validated for this field trial: S1..S6 sensor
+    inputs whose source value is not 99. Source value 99 is a firmware sentinel
+    meaning unavailable/not in use and is ignored.
 
-    Source slot and reported board ID are kept in measurement names/metadata so
-    the original bus identity remains traceable without creating one Atom entity
-    for every source slot during this validation phase.
+    BAT, T1..T3 and relay states are deliberately not emitted yet. They remain
+    outside the telemetry entity until their semantics are validated for the
+    current installation. Source slot and reported board ID are preserved in
+    measurement names/metadata for traceability.
     """
 
     name = "pitaya-saci-v1"
@@ -136,16 +136,12 @@ class PitayaSaciParser:
         board_ids: list[int] = []
 
         sensor_items = []
-        relay_items = []
         for raw_key, raw_value in payload.items():
             key = str(raw_key)
             sensor_match = _SENSOR_SLOT_RE.fullmatch(key)
             if sensor_match is not None:
                 sensor_items.append((int(sensor_match.group("slot")), key, raw_value))
                 continue
-            relay_match = _RELAY_SLOT_RE.fullmatch(key)
-            if relay_match is not None:
-                relay_items.append((int(relay_match.group("slot")), key, raw_value))
 
         for slot_index, slot_key, raw_block in sorted(sensor_items):
             try:
@@ -160,8 +156,6 @@ class PitayaSaciParser:
                 slot_mismatches.append(f"{slot_key}->ID{board_id:02d}")
 
             prefix = f"sensorboard.s{slot_index:02d}.id{board_id:02d}"
-            board_has_valid_sensor = False
-
             for sensor_index in range(1, 7):
                 field = f"S{sensor_index}"
                 if field not in block:
@@ -169,7 +163,6 @@ class PitayaSaciParser:
                 value = float(block[field])
                 if value == INVALID_SENTINEL:
                     continue
-                board_has_valid_sensor = True
                 measurements.append(
                     _measurement(
                         f"{prefix}.s{sensor_index}.raw",
@@ -181,81 +174,15 @@ class PitayaSaciParser:
                     )
                 )
 
-            if "BAT" in block:
-                battery = float(block["BAT"])
-                if battery != INVALID_SENTINEL and 0.0 <= battery <= 100.0:
-                    measurements.append(
-                        _measurement(
-                            f"{prefix}.battery.level",
-                            block["BAT"],
-                            unit="%",
-                            timestamp=timestamp,
-                            source_field=f"{slot_key}.BAT",
-                            board_id=board_id,
-                            slot=slot_key,
-                        )
-                    )
 
-            # T values only make sense when the board has at least one usable S
-            # input. This prevents firmware defaults such as T1=T2=T3=0 on an
-            # entirely unavailable board from becoming scientific telemetry.
-            if board_has_valid_sensor:
-                for tension_index in range(1, 4):
-                    field = f"T{tension_index}"
-                    if field not in block:
-                        continue
-                    value = float(block[field])
-                    if value == INVALID_SENTINEL:
-                        continue
-                    measurements.append(
-                        _measurement(
-                            f"{prefix}.soil.tension.t{tension_index}",
-                            block[field],
-                            unit="kPa",
-                            timestamp=timestamp,
-                            source_field=f"{slot_key}.{field}",
-                            board_id=board_id,
-                            slot=slot_key,
-                        )
-                    )
-
-        for relay_index, relay_key, raw_block in sorted(relay_items):
-            try:
-                block = _fragment(raw_block)
-                board_id = int(block["ID"])
-            except (KeyError, TypeError, ValueError):
-                malformed_blocks.append(relay_key)
-                continue
-
-            prefix = f"relayboard.rele{relay_index}.id{board_id:02d}"
-            for relay_number in range(1, 9):
-                field = f"R{relay_number}"
-                if field not in block:
-                    continue
-                value = float(block[field])
-                if value == INVALID_SENTINEL:
-                    continue
-                raw_state = int(value)
-                if raw_state not in (0, 1):
-                    continue
-                measurements.append(
-                    _measurement(
-                        f"{prefix}.r{relay_number}.state",
-                        bool(raw_state),
-                        timestamp=timestamp,
-                        source_field=f"{relay_key}.{field}",
-                        board_id=board_id,
-                        slot=relay_key,
-                    )
-                )
 
         duplicate_ids = sorted(
             board_id for board_id, count in Counter(board_ids).items() if count > 1
         )
 
         # Structural anomalies remain available as parser metadata for debugging,
-        # but are not persisted as synthetic telemetry rows. The data plane only
-        # receives actual usable measurements from the source.
+        # but are not persisted as telemetry. The data plane receives only the
+        # currently validated S1..S6 measurements whose values are usable.
         metadata = {
             "sensor": "pitaya",
             "location": location,
