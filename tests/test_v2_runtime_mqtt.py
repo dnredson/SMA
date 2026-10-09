@@ -117,7 +117,7 @@ class _Control:
             channel=ChannelRef("ch-1", "ws-1", "Telemetry", "telemetry"),
         )
 
-    def ensure_device_type(self, workspace_id):
+    def ensure_device_type(self, workspace_id, **kwargs):
         self.type_calls += 1
         return DeviceTypeRef(
             id="profile-1",
