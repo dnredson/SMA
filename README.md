@@ -497,19 +497,19 @@ board ID. This avoids changing the core one-RawEvent/one-ParsedEvent contract
 while the field semantics are still being validated against historical agronomic
 data.
 
-Current conservative semantics:
+Current validation semantics:
 
-- source value `99` means unavailable/not in use and is never persisted as
-  telemetry, including `S1..S6`, `BAT`, `T1..T3` and relay fields;
-- operational `S1..S6` values are preserved as raw values without inventing a
+- V1 publishes only the field subset explicitly validated for the current field
+  trial: `S1..S6` sensor inputs;
+- source value `99` means unavailable/not in use and is omitted entirely;
+- valid `S1..S6` values are preserved as raw values without inventing a
   physical unit;
-- `T1..T3` are emitted as device-calculated soil tension in kPa only when that
-  board has at least one usable S input, preventing firmware default zeroes from
-  unused boards from becoming scientific telemetry;
-- valid battery values are retained as 0..100 percent;
-- valid relay values `0/1` become boolean states;
+- `BAT`, `T1..T3` and `R1..R8` are parsed only as source structure for now
+  and are not written to telemetry until their current semantics are validated;
 - slot/ID mismatches, duplicate board IDs and malformed blocks remain parser
   metadata for debugging, but are not written as synthetic telemetry rows;
+- a snapshot containing only `99` sensor values therefore produces no Pitaya
+  telemetry measurements;
 - source `date`/`hour` is interpreted in `SMA_PITAYA_TIMEZONE` (default
   `America/Sao_Paulo`), with receive time as fallback.
 
