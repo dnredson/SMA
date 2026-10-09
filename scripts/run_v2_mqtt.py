@@ -289,6 +289,14 @@ def main() -> int:
                 f"side-channel external={parsed.external_device_id} state={intelligence_state}"
             )
 
+        if result.publish.status == 0 and not result.senml:
+            print(
+                f"SKIPPED parser={result.parser} external={parsed.external_device_id} "
+                "reason=no_valid_measurements records=0",
+                flush=True,
+            )
+            return
+
         role = str(parsed.metadata.get("message_role") or "unknown")
         print(
             "OK "
