@@ -164,7 +164,38 @@ class _Publisher:
         return PublishResult(status=202, body={"status": "accepted"})
 
 
+class _EmptyParser:
+    name = "empty-parser"
+
+    def supports(self, event):
+        return True
+
+    def parse(self, event):
+        return ParsedEvent(
+            external_device_id="device-empty-1",
+            measurements=(),
+            metadata={"sensor": "pitaya", "location": "NSAAB"},
+        )
+
+
 class ManagedRuntimeTests(unittest.TestCase):
+    def test_empty_telemetry_does_not_publish_but_tracks_device(self):
+        control = _Control()
+        publisher = _Publisher()
+        runtime = SmarterAdapterRuntime(
+            pipeline=ParsePipeline(ParserRegistry([_EmptyParser()])),
+            control=control,
+            rules=_Rules(),
+            publisher=publisher,
+        )
+        result = runtime.process(RawEvent(source="mqtt:test", topic="pitaya/NSAAB_DATA", payload=b"{}"))
+        self.assertEqual(result.senml, ())
+        self.assertEqual(result.publish.status, 0)
+        self.assertEqual(result.publish.body["skipped"], "no_valid_measurements")
+        self.assertEqual(publisher.calls, [])
+        self.assertEqual(control.device_calls, 1)
+
+
     def test_bootstrap_is_once_and_device_uses_fast_path_after_first_message(self):
         control = _Control()
         rules = _Rules()
