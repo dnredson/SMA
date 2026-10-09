@@ -438,29 +438,31 @@ class SmarterAdapterRuntime:
             device, cache_source = self._resolve_device(base, device_type, parsed, raw)
 
         senml = tuple(event_to_senml(parsed))
-        try:
-            published = self.publisher.publish(
-                workspace_id=base.workspace.id,
-                channel_id=base.channel.id,
-                device_id=device.id,
-                senml=list(senml),
-            )
-        except PublishError as exc:
-            # A persistent/local mapping may be stale, or the device->channel
-            # policy may have been removed. Reconcile once before giving the
-            # reliability layer a chance to queue the raw event.
-            if exc.status not in (403, 404):
-                raise
-            with self._control_lock:
-                self._devices.pop(parsed.external_device_id, None)
-                device = self._remote_device(base, device_type, parsed, raw)
-                cache_source = "reconciled"
-            published = self.publisher.publish(
-                workspace_id=base.workspace.id,
-                channel_id=base.channel.id,
-                device_id=device.id,
-                senml=list(senml),
-            )
+        if not senml:
+            # No validated telemetry: preserve device activity without an HTTP publish.
+            published = PublishResult(status=0, body={"skipped": "no_valid_measurements"})
+        else:
+            try:
+                published = self.publisher.publish(
+                    workspace_id=base.workspace.id,
+                    channel_id=base.channel.id,
+                    device_id=device.id,
+                    senml=list(senml),
+                )
+            except PublishError as exc:
+                # Reconcile a stale device mapping once for real HTTP failures.
+                if exc.status not in (403, 404):
+                    raise
+                with self._control_lock:
+                    self._devices.pop(parsed.external_device_id, None)
+                    device = self._remote_device(base, device_type, parsed, raw)
+                    cache_source = "reconciled"
+                published = self.publisher.publish(
+                    workspace_id=base.workspace.id,
+                    channel_id=base.channel.id,
+                    device_id=device.id,
+                    senml=list(senml),
+                )
 
         if self.state_store is not None:
             self.state_store.touch_device(
