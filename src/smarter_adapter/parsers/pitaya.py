@@ -82,15 +82,12 @@ class PitayaSaciParser:
 
     Topic convention: pitaya/<LOCATION>_DATA.
 
-    V1 keeps one logical Atom device per Pitaya installation/location and emits
-    only the field subset already validated for this field trial: S1..S6 sensor
-    inputs whose source value is not 99. Source value 99 is a firmware sentinel
-    meaning unavailable/not in use and is ignored.
-
-    BAT, T1..T3 and relay states are deliberately not emitted yet. They remain
-    outside the telemetry entity until their semantics are validated for the
-    current installation. Source slot and reported board ID are preserved in
-    measurement names/metadata for traceability.
+    One logical Atom device is kept per Pitaya location. Firmware sentinel 99
+    means unavailable. On board ID 1 only S3 is validated. Other boards
+    accept S1..S6. T1..T3 are exposed as raw signed readings only for
+    boards with at least one usable S value, avoiding zeros from unpopulated
+    slots. BAT and relay states are not emitted. Source slot and reported
+    board ID remain in names/metadata for traceability.
     """
 
     name = "pitaya-saci-v1"
@@ -156,13 +153,16 @@ class PitayaSaciParser:
                 slot_mismatches.append(f"{slot_key}->ID{board_id:02d}")
 
             prefix = f"sensorboard.s{slot_index:02d}.id{board_id:02d}"
-            for sensor_index in range(1, 7):
+            active_sensor_fields = (3,) if board_id == 1 else range(1, 7)
+            usable_s_values = []
+            for sensor_index in active_sensor_fields:
                 field = f"S{sensor_index}"
                 if field not in block:
                     continue
                 value = float(block[field])
                 if value == INVALID_SENTINEL:
                     continue
+                usable_s_values.append(field)
                 measurements.append(
                     _measurement(
                         f"{prefix}.s{sensor_index}.raw",
@@ -174,6 +174,27 @@ class PitayaSaciParser:
                     )
                 )
 
+            # T registers are raw signed readings, not calibrated temperatures.
+            # Only active sensor boards are eligible; inactive slots send T=0
+            # as a placeholder and must not create telemetry.
+            if usable_s_values:
+                for temperature_index in range(1, 4):
+                    field = f"T{temperature_index}"
+                    if field not in block:
+                        continue
+                    value = float(block[field])
+                    if value == INVALID_SENTINEL:
+                        continue
+                    measurements.append(
+                        _measurement(
+                            f"{prefix}.t{temperature_index}.raw",
+                            block[field],
+                            timestamp=timestamp,
+                            source_field=f"{slot_key}.{field}",
+                            board_id=board_id,
+                            slot=slot_key,
+                        )
+                    )
 
 
         duplicate_ids = sorted(
@@ -182,7 +203,7 @@ class PitayaSaciParser:
 
         # Structural anomalies remain available as parser metadata for debugging,
         # but are not persisted as telemetry. The data plane receives only the
-        # currently validated S1..S6 measurements whose values are usable.
+        # validated S measurements and T readings from active boards.
         metadata = {
             "sensor": "pitaya",
             "location": location,
