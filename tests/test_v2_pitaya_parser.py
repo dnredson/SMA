@@ -53,22 +53,26 @@ class PitayaSaciParserTests(unittest.TestCase):
 
         values = {item.name: item.value for item in event.measurements}
 
-        # ID1 is restricted to S3, which is sentinel 99 here.
-        self.assertFalse(any(".s" in name for name in values))
-        self.assertEqual(values, {})
+        # S and T are forwarded independently (except sentinel 99).
+        self.assertEqual(values["sensorboard.s01.id01.s1.raw"], 3)
+        self.assertEqual(values["sensorboard.s01.id01.s2.raw"], 9)
+        self.assertEqual(values["sensorboard.s01.id01.s4.raw"], 0)
+        self.assertEqual(values["sensorboard.s01.id01.s6.raw"], 0)
+        self.assertNotIn("sensorboard.s01.id01.s3.raw", values)
+        self.assertEqual(values["sensorboard.s01.id01.t1.raw"], -7)
+        self.assertEqual(values["sensorboard.s01.id01.t2.raw"], 12)
 
         # BAT and relay registers remain out of scope.
         self.assertFalse(any("battery" in name for name in values))
-        self.assertFalse(any(".t" in name for name in values))
         self.assertFalse(any(name.startswith("relayboard.") for name in values))
         self.assertFalse(any(name.startswith("bus.") for name in values))
 
         expected = datetime(
             2026, 10, 9, 12, 53, 4, tzinfo=ZoneInfo("America/Sao_Paulo")
         ).timestamp()
-        self.assertEqual(expected, datetime(2026, 10, 9, 12, 53, 4, tzinfo=ZoneInfo("America/Sao_Paulo")).timestamp())
+        self.assertTrue(all(m.timestamp == expected for m in event.measurements))
 
-    def test_id1_s3_and_t_fields_only_with_real_sample(self):
+    def test_all_s_and_t_fields_forwarded_from_real_sample(self):
         payload = {
             "date": "09/10/2026",
             "hour": "15:43:24",
@@ -79,14 +83,28 @@ class PitayaSaciParserTests(unittest.TestCase):
         parsed = PitayaSaciParser().parse(self._raw(payload))
         self.assertIsNotNone(parsed)
         values = {m.name: m.value for m in parsed.measurements}
-        self.assertEqual(len(values), 11)
+        self.assertEqual(len(values), 21)
         self.assertEqual(values["sensorboard.s01.id01.s3.raw"], 2)
         self.assertEqual(values["sensorboard.s01.id01.t1.raw"], -20)
         self.assertEqual(values["sensorboard.s01.id01.t2.raw"], -3)
         self.assertEqual(values["sensorboard.s01.id01.t3.raw"], -18)
         self.assertEqual(values["sensorboard.s02.id02.t1.raw"], -20)
-        self.assertFalse(any("sensorboard.s06." in n for n in values))
-        self.assertFalse(any("sensorboard.s01.id01.s1" in n for n in values))
+        self.assertEqual(values["sensorboard.s01.id01.s1.raw"], 0)
+        self.assertEqual(values["sensorboard.s01.id01.s2.raw"], 17)
+        # Do not mistake inactive-board T zeros for confirmed measurements:
+        # preserve them as raw and delegate validity to the platform.
+        self.assertEqual(values["sensorboard.s06.id06.t1.raw"], 0)
+        self.assertEqual(values["sensorboard.s06.id06.t2.raw"], 0)
+        self.assertEqual(values["sensorboard.s06.id06.t3.raw"], 0)
+
+    def test_t_is_independent_of_s_even_without_s_readings(self):
+        payload = {"s3": '"ID":03,"S1":99,"S2":99,"S3":99,"S4":99,"S5":99,"S6":99,"T1":-18,"T2":99,"T3":0'}
+        parsed = PitayaSaciParser().parse(self._raw(payload))
+        values = {m.name: m.value for m in parsed.measurements}
+        self.assertEqual(values, {
+            "sensorboard.s03.id03.t1.raw": -18,
+            "sensorboard.s03.id03.t3.raw": 0,
+        })
 
     def test_all_99_sensor_snapshot_emits_no_telemetry(self):
         payload = {
