@@ -335,7 +335,7 @@ Example context state:
 
 # Parser and input plugins
 
-The production v2 registry currently loads the native Irrigap ChirpStack parser first, then the legacy compatibility parser. The compatibility parser delegates to the already existing v1 sensor decoders.
+The production v2 registry currently loads the native Pitaya/SACI parser first, then the native Irrigap ChirpStack parser and finally the legacy compatibility parser. The compatibility parser delegates to the already existing v1 sensor decoders.
 
 ## 1. MQTT input plugin
 
@@ -455,7 +455,69 @@ The deployment catalog maps node ids to sensor family/location/depth. Example:
 }
 ```
 
-## 3. Legacy compatibility parser
+
+## 3. Native Pitaya / SACI aggregate parser
+
+Implementation:
+
+```text
+src/smarter_adapter/parsers/pitaya.py
+```
+
+Plugin name:
+
+```text
+pitaya-saci-v1
+```
+
+Topic convention:
+
+```text
+pitaya/<LOCATION>_DATA
+```
+
+The location is extracted from the MQTT topic, so the same parser can ingest
+independent farms such as `pitaya/NSAAB_DATA` and `pitaya/LANAPRE_DATA`.
+
+The current gateway snapshot contains up to 50 sensor-board slots:
+
+```text
+ID, S1, S2, S3, S4, S5, S6, BAT, T1, T2, T3
+```
+
+and seven relay-board slots:
+
+```text
+ID, R1, R2, R3, R4, R5, R6, R7, R8
+```
+
+V1 intentionally represents one MQTT bus snapshot as one logical Atom device
+(`PITAYA_<LOCATION>`) and namespaces telemetry by both source slot and reported
+board ID. This avoids changing the core one-RawEvent/one-ParsedEvent contract
+while the field semantics are still being validated against historical agronomic
+data.
+
+Current validation semantics:
+
+- V1 publishes only the field subset explicitly validated for the current field
+  trial: `S1..S6` sensor inputs;
+- source value `99` means unavailable/not in use and is omitted entirely;
+- valid `S1..S6` values are preserved as raw values without inventing a
+  physical unit;
+- `BAT`, `T1..T3` and `R1..R8` are parsed only as source structure for now
+  and are not written to telemetry until their current semantics are validated;
+- slot/ID mismatches, duplicate board IDs and malformed blocks remain parser
+  metadata for debugging, but are not written as synthetic telemetry rows;
+- a snapshot containing only `99` sensor values therefore produces no Pitaya
+  telemetry measurements;
+- source `date`/`hour` is interpreted in `SMA_PITAYA_TIMEZONE` (default
+  `America/Sao_Paulo`), with receive time as fallback.
+
+Crop, sector and agronomic threshold semantics deliberately remain outside the
+adapter. Those belong to the application/domain layer that relates a physical
+sensor to a crop and its management limits.
+
+## 4. Legacy compatibility parser
 
 Implementation:
 
@@ -618,6 +680,9 @@ teros12
 
 greenstick
   key: smarter-adapter-greenstick
+
+pitaya
+  key: smarter-adapter-pitaya
 
 LoRaWAN gateway
   key: smarter-adapter-lorawan-gateway

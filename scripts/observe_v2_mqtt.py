@@ -14,7 +14,7 @@ from smarter_adapter.inputs import MQTTInputConfig
 from smarter_adapter.irrigap_config import load_irrigap_catalog
 from smarter_adapter.legacy_parser import LegacySensorParser
 from smarter_adapter.observer import MQTTObserver
-from smarter_adapter.parsers import IrrigapChirpStackParser
+from smarter_adapter.parsers import IrrigapChirpStackParser, PitayaSaciParser
 from smarter_adapter.pipeline import ParsePipeline
 from smarter_adapter.plugins import ParserRegistry
 
@@ -45,6 +45,7 @@ def main() -> int:
     )
     pipeline = ParsePipeline(
         ParserRegistry([
+            PitayaSaciParser(source_timezone=env("SMA_PITAYA_TIMEZONE", "America/Sao_Paulo")),
             IrrigapChirpStackParser(catalog.nodes),
             LegacySensorParser(),
         ])

@@ -41,7 +41,7 @@ from smarter_adapter.lifecycle_service import LifecycleSmarterAdapterService
 from smarter_adapter.magistrala import AtomConfig, ControlPlane, RulesClient, TimescaleReaderClient
 from smarter_adapter.magistrala.lifecycle import LifecycleAtomClient
 from smarter_adapter.magistrala.publisher import FluxMQPublisher
-from smarter_adapter.parsers import IrrigapChirpStackParser
+from smarter_adapter.parsers import IrrigapChirpStackParser, PitayaSaciParser
 from smarter_adapter.pipeline import ParsePipeline
 from smarter_adapter.plugins import ParserRegistry
 from smarter_adapter.presence import DevicePresencePolicy
@@ -191,6 +191,7 @@ def main() -> int:
     )
     parsers = ParserRegistry(
         [
+            PitayaSaciParser(source_timezone=env("SMA_PITAYA_TIMEZONE", "America/Sao_Paulo")),
             IrrigapChirpStackParser(node_resolver=catalog_manager.get_node),
             LegacySensorParser(),
         ]
@@ -287,6 +288,14 @@ def main() -> int:
             intelligence_warning(
                 f"side-channel external={parsed.external_device_id} state={intelligence_state}"
             )
+
+        if result.publish.status == 0 and not result.senml:
+            print(
+                f"SKIPPED parser={result.parser} external={parsed.external_device_id} "
+                "reason=no_valid_measurements records=0",
+                flush=True,
+            )
+            return
 
         role = str(parsed.metadata.get("message_role") or "unknown")
         print(

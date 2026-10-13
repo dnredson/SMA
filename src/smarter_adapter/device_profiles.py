@@ -60,6 +60,17 @@ DEFAULT_DEVICE_PROFILES: Mapping[str, DeviceProfileSpec] = {
         ),
         json_schema=_family_schema("greenstick"),
     ),
+    "pitaya": DeviceProfileSpec(
+        family="pitaya",
+        key="smarter-adapter-pitaya",
+        name="Pitaya / SACI Sensor Bus",
+        description=(
+            "Pitaya/SACI aggregate sensor and relay bus managed by Smarter Adapter 2.0. "
+            "V1 preserves source slot and reported board identity while field semantics "
+            "are validated against agronomic history."
+        ),
+        json_schema=_family_schema("pitaya"),
+    ),
 }
 
 
@@ -72,7 +83,7 @@ def normalize_sensor_family(value: object) -> str:
 class DeviceProfileRegistry:
     """Resolve parsed events to typed Atom device profiles.
 
-    Unknown sensor families deliberately return ``None`` so the runtime keeps
+    Unknown sensor families deliberately return None so the runtime keeps
     the existing generic profile as a safe fallback.
     """
 

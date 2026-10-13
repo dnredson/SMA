@@ -33,6 +33,10 @@ class _FakeResponse:
 
 
 class SenMLV2Tests(unittest.TestCase):
+    def test_empty_event_has_no_senml_records(self):
+        event = ParsedEvent(external_device_id="PITAYA_NSAAB", measurements=())
+        self.assertEqual(event_to_senml(event), [])
+
     def test_device_serial_is_preserved_in_bn_without_separator(self):
         event = ParsedEvent(
             external_device_id="sensor-01",

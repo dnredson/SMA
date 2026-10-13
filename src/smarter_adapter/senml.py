@@ -47,7 +47,7 @@ def event_to_senml(
         base_time = time.time()
 
     if not measurements:
-        return [{"bn": event.external_device_id, "bt": base_time}]
+        return []
 
     pack: List[Dict[str, Any]] = []
     for measurement in measurements:
