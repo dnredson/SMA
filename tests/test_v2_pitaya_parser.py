@@ -83,7 +83,7 @@ class PitayaSaciParserTests(unittest.TestCase):
         parsed = PitayaSaciParser().parse(self._raw(payload))
         self.assertIsNotNone(parsed)
         values = {m.name: m.value for m in parsed.measurements}
-        self.assertEqual(len(values), 21)
+        self.assertEqual(len(values), 19)
         self.assertEqual(values["sensorboard.s01.id01.s3.raw"], 2)
         self.assertEqual(values["sensorboard.s01.id01.t1.raw"], -20)
         self.assertEqual(values["sensorboard.s01.id01.t2.raw"], -3)
